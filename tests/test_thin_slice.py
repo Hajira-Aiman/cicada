@@ -22,11 +22,11 @@ def test_thin_slice_collection_and_signing():
 
     # Assert basic envelope properties
     assert payload.schema_version == "airlock.v1"
-    assert payload.tenant_id == guard.config.TENANT_ID
-    assert payload.guard_id == guard.config.GUARD_ID
+    assert payload.tenant_id == "acme"
+    assert payload.guard_id == "guard-acme-01"
     assert payload.seq == 1
     assert payload.prev_hash == "GENESIS"
-    assert payload.window.source_tz == guard.config.TIMEZONE
+    assert payload.window.source_tz == "Asia/Kolkata"
 
     # Assert CPU metric item
     assert len(payload.metrics) == 1
@@ -57,7 +57,7 @@ def test_thin_slice_send_to_mock_ingest():
         assert len(received_payloads) == 1
         ingested = received_payloads[0]
         assert ingested["payload_id"] == payload.payload_id
-        assert ingested["tenant_id"] == guard.config.TENANT_ID
+        assert ingested["tenant_id"] == "acme"
         assert ingested["metrics"][0].name == "cpu_pct"
 
 
@@ -79,7 +79,7 @@ def test_reject_tampered_signature():
         )
 
         # Simulate in-flight tampering of body
-        tampered_body = body_bytes.replace(guard.config.TENANT_ID.encode(), b"evil")
+        tampered_body = body_bytes.replace(b"acme", b"evil")
 
         response = client.post("/v1/ingest", content=tampered_body, headers=headers)
         assert response.status_code == 401

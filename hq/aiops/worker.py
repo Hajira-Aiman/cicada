@@ -1,12 +1,19 @@
 """AIOps worker: every 2 s read new windows from airlock_in + airlock_eu, run the engine, write health.
   python -m hq.aiops.worker
-Tables it reads (metrics, events, payloads) come from ingest; it owns health_history, health_current, tenant_thresholds.
+Tables it reads (metrics, events, payloads: Sahiti's scripts/init_postgres.sql); it owns health_history, health_current, tenant_thresholds.
 All table access is in this file, so swapping to the real ingest schema only touches the SELECTs below."""
 import json, logging, time
 from datetime import datetime, timezone
 import psycopg
 from hq.aiops.engine import Engine, Thresholds
-from tools.common import dsn
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+
+def dsn(db):
+    g = os.getenv
+    return f"postgresql://{g('DB_USER','postgres')}:{g('DB_PASSWORD','postgres')}@{g('DB_HOST','localhost')}:{g('DB_PORT',5432)}/{db}"
 
 log = logging.getLogger("aiops")
 SCHEMA = """
@@ -31,11 +38,11 @@ class Region:
     def fetch(self):
         """New windows since the cursor, grouped per (tenant, source, window) and sorted by event time."""
         # 300 ms lag: ingest inserts the payload row before its metrics, so wait for the rows to land
-        rows = self.db.execute("""SELECT m.tenant_id, m.source, extract(epoch from m.ts), extract(epoch from p.received_at),
+        rows = self.db.execute("""SELECT m.tenant_id, m.source, extract(epoch from m.event_time), extract(epoch from p.received_at),
                                          m.name, m.avg, p.received_at
                                   FROM metrics m JOIN payloads p USING(payload_id)
                                   WHERE p.received_at > %s AND p.received_at <= now() - interval '300 ms'""", (self.cursor,)).fetchall()
-        evs = self.db.execute("""SELECT e.tenant_id, e.source, extract(epoch from e.ts), e.category, e.severity
+        evs = self.db.execute("""SELECT e.tenant_id, e.source, extract(epoch from e.event_time), e.category, e.severity
                                  FROM events e JOIN payloads p USING(payload_id)
                                  WHERE p.received_at > %s AND p.received_at <= now() - interval '300 ms'""", (self.cursor,)).fetchall()
         win = {}

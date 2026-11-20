@@ -1,122 +1,137 @@
-# Airlock — Role A: AIOps and AI Implementation Milestones
+# Milestones & Delivery Tracker: Tenant 1 (Shop A / Acme)
 
-## Project Tracking & Progress (Role A · AIOps & AI Engineer)
-
-| Milestone | Phase | Focus Area | Status | Target Delivery |
-| --- | --- | --- | --- | --- |
-| **M0** | H0–H2 | Prerequisites, ML/AI Dependencies & Contracts | ✅ Completed | Immediate |
-| **M1** | H2–H6 | Simulator (`tools/simulate.py`) & Baseline + Health Engine v1 | ✅ Completed | H2–H6 |
-| **M2** | H6–H12 | River ML Anomaly Scoring, Multi-Signal Agreement & Incident Grouping | 🔄 Ready / Next | H6–H12 |
-| **M3** | H12–H15 | Real Telemetry Ingest Integration & Threshold Tuning | ⏳ Pending | H12–H15 |
-| **M4** | H15–H20 | Kill-Chain Engine, Counterfactuals, AI Assistant (Ollama) & Scheduled Jobs | ⏳ Pending | H15–H20 |
-| **M5** | H20–H22 | Full Scenario Verification Suite & Chaos Rehearsal | ⏳ Pending | H20–H22 |
-| **M6** | H22–H24 | Final Live Demonstration & Judging Support | ⏳ Pending | H22–H24 |
+This document tracks all deliverables for **Tenant 1 (Shop A "Acme", Tier 1 Guard & Local Environment)** across all hackathon phases.
 
 ---
 
-## Milestone 0: Prerequisites, Dependencies & Incident Contracts (H0–H2)
-*Goal: Ensure Python environment contains math/ML libraries and shared contracts define full incident schemas.*
-
-- [x] **0.1 Environment & Tool Verification**
-  - [x] Python 3.13/3.14 virtual environment `.venv` active.
-  - [x] Install streaming ML & LLM libraries: `river`, `openai`, `numpy`, `scipy`.
-- [x] **0.2 Shared Contracts Frozen (`contracts/models.py`)**
-  - [x] `AirlockPayload` with strict `extra="forbid"` and allow-listed metrics/events.
-  - [x] Add `Incident`, `SignalEvidence`, and `Recommendation` models to `contracts/models.py`.
-  - [x] Unit tests in `tests/test_contracts.py` verifying serialization and schema constraints.
+## Progress Overview
+- **Overall Completion:** 30% (Phase 0 & Phase 1 complete, moving to Phase 2 Thin Slice)
+- **Current Phase:** Phase 2: Thin Slice End-to-End
+- **Target Branch:** `hajira`
 
 ---
 
-## Milestone 1: Simulator & Baseline + Health Engine v1 (H2–H6)
-*Goal: Deliver the multi-guard chaos simulator for team unblocking and build the core EWMA baseline and 4-state health engine with hysteresis.*
-
-- [x] **1.1 Multi-Guard Chaos Simulator (`tools/simulate.py`)**
-  - [x] Asynchronous multi-guard runner sending valid signed `airlock.v1` payloads.
-  - [x] Implement scenario switches:
-    - [x] `normal`: Healthy baseline metrics.
-    - [x] `cpu_spike`: Rapid CPU excursion ($>95\%$).
-    - [x] `latency`: Elevated round-trip latency ($>500\text{ ms}$) and packet loss.
-    - [x] `login_burst`: Authentication burst (count=50) with honeypot user `admin_backup`.
-    - [x] `outage`: Interrupted heartbeat for $\ge 35\text{ s}$ to test stale/offline detection.
-    - [x] `duplicates`: Replay payload ID transmission for deduplication testing.
-    - [x] `out_of_order`: Out-of-order window delivery.
-    - [x] `kill_chain`: Automated progression across the 4 stages.
-- [x] **1.2 EWMA Baseline Engine (`hq/aiops/baseline.py`)**
-  - [x] Rolling mean ($\mu$) and standard deviation ($\sigma$) with $\alpha=0.1$.
-  - [x] Warm-up tracking (30 data points / 60 seconds).
-  - [x] Calculate $|z|$-scores per `(tenant_id, source, metric)`.
-  - [x] 3-window consecutive persistence filter (6 seconds) before flagging.
-- [x] **1.3 Four Health States & Anti-Flapping Engine (`hq/aiops/health.py`)**
-  - [x] Implement 4 health states: `Excellent`, `Good`, `Fair`, `Poor`.
-  - [x] Stale data detector (10s without data $\rightarrow$ Fair; 30s $\rightarrow$ Poor/Offline).
-  - [x] Explicit reason generation for every transition.
-  - [x] Anti-flapping hysteresis (6s bad to enter worse state, 20s good to recover).
-  - [x] Maintain persistent `flaps_prevented` counter.
-- [x] **1.4 Milestone 1 Automated Tests**
-  - [x] `tests/test_simulate.py`: Verify simulator payload compliance and signature validity (6 tests passing).
-  - [x] `tests/test_aiops_health.py`: Verify baseline convergence, 4-state transitions, stale handling, and hysteresis (4 tests passing).
+## Phase 0: Pre-requisites & Environment Setup
+- [x] **Task 0.1: Python Environment & Dependencies**
+  - [x] Identify Python executable (`py` / Python 3.14 / 3.11+)
+  - [x] Check / Install required libraries: `fastapi`, `uvicorn`, `pydantic>=2.0`, `psutil`, `httpx`, `drain3`, `detect-secrets`, `pytest`, `python-dotenv`
+  - [x] Verify test runner (`py -m pytest`)
+- [x] **Task 0.2: Project Directory Structure**
+  - [x] Initialize `contracts/` directory
+  - [x] Initialize `guard/` and submodules (`collectors/`, `engine/`, `storage/`, `api/`)
+  - [x] Initialize `shop-api/` and `shop-api/logs/`
+  - [x] Initialize `chaos/`
+  - [x] Initialize `tests/`
+- [x] **Task 0.3: Environment Configuration**
+  - [x] Create `.env.example`
+  - [x] Create active `.env` for Tenant 1 (`acme`, ports 7000, 9000, 9100, local keys)
+- [x] **Task 0.4: NPU Hardware & Lemonade AI Verification (T0)**
+  - [x] Detect `AMD Ryzen AI 7 350` and `NPU Compute Accelerator Device`
+  - [x] Connect to Lemonade Server running on port `13305`
+  - [x] Install `ryzenai-llm:npu` backend
+  - [x] Download & load `Qwen2.5-0.5B-Instruct-Hybrid` NPU model
+  - [x] Verify chat completions inference via `/v1/chat/completions` ([shop_ai.py](file:///C:/Users/hajir/OneDrive/Desktop/Projects/cicada26/guard/shop_ai.py))
 
 ---
 
-## Milestone 2: River ML Anomaly Scoring & Incident Grouping (H6–H12)
-*Goal: Implement streaming ML second-opinion scoring, signal consensus, and 120s incident correlation.*
-
-- [ ] **2.1 Streaming ML Anomaly Scoring (`hq/aiops/anomaly.py`)**
-  - [ ] Implement `river.anomaly.HalfSpaceTrees` streaming isolation forest.
-  - [ ] Multi-dimensional vector: `[cpu, mem, latency, packet_loss, net_out]`.
-  - [ ] "Signals must agree" rule: Single CPU spike classified as `info: usage spike`; multi-signal deviation opens an incident.
-- [ ] **2.2 Incident Grouping Engine (`hq/aiops/correlator.py`)**
-  - [ ] 120-second correlation window for same tenant and related topology component.
-  - [ ] Deduplication of repeating alerts into counters.
-  - [ ] Signal contribution percentage calculation: $\frac{|z_i|}{\sum |z|} \times 100\%$.
-  - [ ] Confidence formula calculation: $0.40 + 0.15 \times N_{\text{agreeing}} + 0.10 \times \text{rule\_matched}$.
+## Phase 1 (H0–H2): Contracts & Protocol Models
+- [x] **Task 1.1: Frozen Payload JSON Schema**
+  - [x] Create `contracts/payload.schema.json` according to Hackathon Plan v1
+  - [x] Enforce strict allow-list: `additionalProperties: false`, fixed metric names, fixed event categories, pseudonym regex `^(host|src|user|proc)-[0-9a-f]{8}$`
+- [x] **Task 1.2: Pydantic Data Contracts**
+  - [x] Implement `contracts/models.py` with `ConfigDict(extra="forbid")`
+  - [x] Models: `MetricItem`, `EventItem`, `LogPatternItem`, `HealthInfo`, `PayloadV1`, `SignedReceipt`, `ActionIntent`
+  - [x] Unit tests in `tests/test_contracts.py` ensuring invalid fields and unredacted free text are strictly rejected
 
 ---
 
-## Milestone 3: Real Integration & Threshold Tuning (H12–H15)
-*Goal: Integrate AIOps engine with live regional ingest services and tune baselines on real guard telemetry.*
-
-- [ ] **3.1 Ingest Service Integration**
-  - [ ] Consume ingested payloads from PostgreSQL / in-memory ingest worker.
-  - [ ] Process out-of-order payloads by event-time (`window.start`).
-- [ ] **3.2 Threshold Calibration**
-  - [ ] Tune EWMA $\alpha$ and warm-up parameters against real multi-laptop telemetry.
-  - [ ] Verify transition latency (under 15s from injection to alert).
-
----
-
-## Milestone 4: Advanced Intelligence, AI Assistant & Extras (H15–H20)
-*Goal: Deliver Ollama-powered explainable AI assistant, kill-chain detection, counterfactuals, and learned scheduled jobs.*
-
-- [ ] **4.1 Kill-Chain Rule Engine**
-  - [ ] Detect sequence: `auth_failure_burst` $\rightarrow$ login success $\rightarrow$ CPU anomaly $\rightarrow$ outbound spike within 10 min.
-  - [ ] Merge into single Critical Incident: *"Possible compromise: cryptomining"*.
-- [ ] **4.2 Change Event Linking ("What changed just before")**
-  - [ ] Correlate guard change events (`app_restarted`, `config_changed`) occurring within 5 min before an incident.
-  - [ ] Annotate incident and raise confidence by $+0.10$.
-- [ ] **4.3 Counterfactual Engine**
-  - [ ] Deterministically re-run health engine without each signal to prove necessity.
-- [ ] **4.4 Learned Scheduled Jobs (`hq/aiops/scheduled_jobs.py`)**
-  - [ ] Track recurring spike intervals; learn 3 regular intervals ($\pm 10\%$).
-  - [ ] Suppress predictable spikes as `info: scheduled job (every ~N s)` with reason displayed.
-- [ ] **4.5 Head-Office AI Assistant (`hq/ai/`)**
-  - [ ] Ollama integration using OpenAI Python client (`qwen3.5:4b`).
-  - [ ] Evidence-only system prompt with mandatory `[ev-N]` citations.
-  - [ ] Hard refusal rule: *"I do not have access to that information. Raw customer data never leaves the customer environment."*
-  - [ ] Automated incident narrative synthesis.
-- [ ] **4.6 Thumbs Feedback Suppression**
-  - [ ] 👎 on an alert temporarily raises $|z|$ threshold from 3.0 to 3.5 for 30 min.
+## Phase 2 (H2–H6): Thin Slice End-to-End
+- [x] **Task 2.1: Demo Target Application (`shop-api/`)** (Scaffolded, full implementation in H6-H12 T16)
+- [x] **Task 2.2: Basic Guard Telemetry Collector**
+  - [x] Collect `cpu_pct` via `psutil` every 2s
+  - [x] Construct valid `airlock.v1` payload with UTC + `source_tz`
+- [x] **Task 2.3: Payload Builder & HMAC Signature**
+  - [x] Build schema-valid payload with pseudonymous host identifier
+  - [x] Sign payload with HMAC-SHA256 over body + timestamp using `GUARD_SECRET_KEY`
+- [x] **Task 2.4: Egress & Ingest Receipt Handling**
+  - [x] Outbound POST sender to regional ingest (`http://localhost:8001/v1/ingest`)
+  - [x] Verified against `tests/mock_ingest.py`
+  - [x] Receipt verification and status checking
+- [x] **Task 2.5: Thin Slice Verification Test**
+  - [x] Automated end-to-end integration test validating collection -> build -> sign -> dispatch -> receipt ([test_thin_slice.py](file:///C:/Users/hajir/OneDrive/Desktop/Projects/cicada26/tests/test_thin_slice.py))
 
 ---
 
-## Milestone 5: Verification Suite & Rehearsal (H20–H22)
-*Goal: Rehearse and pass all 15 hackathon judge scenarios end-to-end.*
-
-- [ ] Automated execution of all scenarios using `tools/simulate.py`.
-- [ ] Verification of noise reduction metrics (e.g. 47 alerts $\rightarrow$ 3 incidents, 94% noise cut).
-- [ ] Freeze code and eliminate regressions.
+## Phase 3 (H6–H12): Core Privacy Engine & Local Observability
+- [ ] **Task 3.1: Local Raw Store (`raw_store.py`)**
+  - [ ] SQLite raw telemetry & log database (`data/raw.db`)
+  - [ ] Configurable 24-hour retention countdown and auto-cleanup
+  - [ ] Zero egress verification
+- [ ] **Task 3.2: Secret Scrubber & Canary Tripwires (`scrubber.py`)**
+  - [ ] Regex & detect-secrets scrubbing for AWS keys, JWTs, passwords, card numbers
+  - [ ] Canary planter inserting fake keys (`AKIACANARY...`) into raw stream every 30s
+  - [ ] Pre-send tripwire check blocking any outgoing canary or leak
+- [ ] **Task 3.3: Drain3 Log Pattern Mining (`pattern_miner.py`)**
+  - [ ] Extract patterns and template IDs (e.g. `tpl-3fa1`) from raw log stream
+  - [ ] Maintain cluster state and count pattern occurrences
+  - [ ] Flag `is_new: true` for newly discovered templates
+- [ ] **Task 3.4: Window Aggregation & Local Anomaly Detectors (`detectors.py`)**
+  - [ ] 2-second tumbling windows with avg, max, and event counts
+  - [ ] Login failure burst detector (>30 in 60s -> `auth_failure_burst`)
+  - [ ] Honeypot user detector (`admin_backup` -> `honeypot_hit`)
+  - [ ] Odd-hour login detector (3:00 AM shop local time)
+  - [ ] Power on battery detector via `psutil.sensors_battery()`
+  - [ ] Change tracker (`app_restarted`, `config_changed`)
+- [ ] **Task 3.5: Pseudonymization Engine & Local Reveal Table (`pseudonymizer.py`)**
+  - [ ] HMAC-SHA256 masking (`host-`, `src-`, `user-`, `proc-`)
+  - [ ] Local encrypted/private SQLite reveal table (`data/reveal.db`)
+- [ ] **Task 3.6: Local Shop Screen API (`guard/api.py` on Port 9000)**
+  - [ ] `/api/status`: health, buffer depth, version, retention countdown
+  - [ ] `/api/raw-logs`: raw logs with unmasked secrets (Shop view only)
+  - [ ] `/api/egress`: live ledger view with payload hashes and receipt checks
+  - [ ] `/api/reveal-requests`: approve/reject reveal requests from Head Office
 
 ---
 
-## Milestone 6: Live Demonstration & Judging (H22–H24)
-*Goal: Stand by during live judging to explain mathematical models and AI evidence citations.*
+## Phase 4 (H12–H15): Resilience, Outages & Checkpoints
+- [ ] **Task 4.1: Offline Buffering & Resumption**
+  - [ ] Verify guard buffers cleanly during network cut or ingest downtime
+  - [ ] Verify FIFO drain upon reconnection with zero data loss and zero duplicates
+- [ ] **Task 4.2: Hash-Chained Audit Ledger**
+  - [ ] Sequential hash chaining: `prev_hash` validation
+  - [ ] Sequence number monotonic tracking and gap detection
+- [ ] **Task 4.3: 60-Second Checkpoint Generator (`checkpoints.py`)**
+  - [ ] Cumulative SHA-256 calculation over sent payload hashes
+  - [ ] `/api/checkpoint` endpoint for sent-vs-received tamper proofing
+
+---
+
+## Phase 5 (H15–H20): Safe Remediation & Chaos Agent
+- [ ] **Task 5.1: Action Executor (`executor.py`)**
+  - [ ] Pull signed action intents from Head Office
+  - [ ] Policy gate: tenant permissions, allowed commands (`kill_process`, `restart_service`, `block_source`)
+  - [ ] Dry-run endpoint support
+  - [ ] Target resolution via local pseudonym table
+  - [ ] Execution with 120s rollback timer and audit logging
+- [ ] **Task 5.2: Local Chaos Agent (`chaos/` on Port 9100)**
+  - [ ] CPU spike generator
+  - [ ] Simulated latency / loss
+  - [ ] Brute-force failed login generator
+  - [ ] Try-to-leak payload injector
+  - [ ] Battery disconnect simulation
+- [ ] **Task 5.3: Shop AI Assistant Integration (`shop_ai.py`)**
+  - [ ] Local OpenAI client targeting Lemonade (port 13305) or CPU fallback
+  - [ ] Function calling over local SQLite raw data: `search_raw_logs`, `recent_auth_failures`
+
+---
+
+## Phase 6 (H20–H24): Rehearsal & Live Verification
+- [ ] **Task 6.1: Full Scenario Verification**
+  - [ ] Try-to-leak test (secrets masked, canaries blocked)
+  - [ ] Region outage & resume test (reconciliation sent == received)
+  - [ ] Brute-force login detection test
+  - [ ] Chaos CPU spike & kill-process remediation test
+  - [ ] Pseudonym reveal request & approval flow test
+- [ ] **Task 6.2: Final Code Freeze & Documentation**
+  - [ ] Run complete test suite (`py -m pytest tests/ -v`)
+  - [ ] Update demo runbook in `README.md`

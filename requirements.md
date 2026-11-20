@@ -1,158 +1,157 @@
-# Airlock — Role A: AIOps and AI Requirements Specification
+# Requirements: Tenant 1 (Shop A "Acme" - Tier 1 Guard & Local Environment)
 
-## 1. Executive Summary & Role Ownership
-
-- **Role:** **A · AIOps and AI Engineer**
-- **Core Philosophy:** *"Math decides what is wrong; the AI only explains it."* Every number on an incident card traces directly back to stored allow-listed metrics or events. The AI never guesses or hallucinates root causes.
-- **Owned Codebases:**
-  - `tools/simulate.py`: Multi-guard payload simulator supporting all live hackathon chaos scenarios.
-  - `hq/aiops/`: Mathematical analytics engine (EWMA baselines, River anomaly detection, 4 health states with hysteresis, multi-signal agreement, incident correlation, kill-chain detection, contribution bars, confidence scoring, counterfactuals, runbook recommendations, scheduled job learning).
-  - `hq/ai/`: Head-office AI assistant (Ollama / Qwen integration via OpenAI client, evidence-only citation enforcement, automated incident narratives).
-  - Shared contracts for incidents (`contracts/models.py`).
-
----
-
-## 2. Mathematical & Algorithmic Specifications
-
-### 2.1 Baseline Engine (`hq/aiops/baseline.py`)
-- **Metric Scope:** Per `(tenant_id, source, metric_name)`.
-- **Model:** Exponentially Weighted Moving Average (EWMA) and Exponentially Weighted Moving Variance (EWMVar).
-- **Parameters:**
-  - $\alpha = 0.1$ (smoothing factor).
-  - Warm-up threshold: 30 data points (60 seconds at 2s intervals).
-- **Deviation Metric ($z$-score):**
-  $$z = \frac{x_t - \mu_t}{\sigma_t + \epsilon}$$
-  where $\epsilon = 10^{-6}$ prevents division by zero.
-- **Flag Condition:** $|z| \ge 3.0$ for **3 consecutive windows** (6 seconds), preventing single-sample transient blips from triggering false alarms.
-- **Feedback Suppression:** A thumbs-down (👎) feedback on a signal raises the threshold from $|z| \ge 3.0$ to $|z| \ge 3.5$ for that metric for 30 minutes.
-
-### 2.2 River Online ML Anomaly Scoring (`hq/aiops/anomaly.py`)
-- **Algorithm:** `river.anomaly.HalfSpaceTrees` (streaming isolation trees).
-- **Features:** 5-dimensional normalized vector: `[cpu_pct, mem_pct, latency_ms, packet_loss_pct, net_out_kbps]`.
-- **Role:** Second opinion score $[0.0, 1.0]$.
-- **Consensus Rule ("Signals Must Agree"):**
-  - High CPU alone with normal latency and normal errors is classified as `info: usage spike`.
-  - An anomaly is escalated to an incident only when multiple signals agree (e.g. CPU + latency + errors) or River anomaly score $> 0.75$.
-
-### 2.3 Four Health States & Hysteresis Engine (`hq/aiops/health.py`)
-- **Health States & Evaluation Order:**
-  1. **Poor (Critical):**
-     - Collector offline: no heartbeat received for $\ge 30\text{ s}$.
-     - `service_down` event received.
-     - Honeypot hit (`honeypot_hit`) or kill-chain match.
-     - `latency_ms > 1000\text{ ms}` or `packet_loss_pct > 10\%`.
-  2. **Fair (Degraded / Warning):**
-     - Stale data: no heartbeat received for $10\text{ s} \le t < 30\text{ s}$.
-     - Sustained anomaly: $|z| \ge 3.0$ for 3 consecutive windows.
-     - Resource pressure: `cpu_pct > 85\%`, `mem_pct > 90\%`, `disk_pct > 90\%`.
-     - Network degradation: `latency_ms > 200\text{ ms}` or `packet_loss_pct > 2\%`.
-     - Medium `auth_failure_burst`.
-  3. **Good (Minor Warning):**
-     - Single metric $2.0 \le |z| < 3.0$, or single warning threshold breached for $< 30\text{ s}$.
-     - Service fully available.
-  4. **Excellent (Normal):**
-     - Heartbeat fresh ($< 10\text{ s}$).
-     - All metrics within normal baseline ($|z| < 2.0$).
-- **Anti-Flapping (Hysteresis):**
-  - **Degrade:** Transitions to a worse state require bad data sustained for $\ge 6\text{ s}$ (3 windows).
-  - **Recover:** Transitions to a better state require good data sustained for $\ge 20\text{ s}$ (10 windows).
-  - Blocked flapping transitions increment a persistent `flaps_prevented` counter.
-- **Explainability:** Every state transition records: `tenant_id`, `source`, `old_state`, `new_state`, `reasons` (list of human-readable evidence strings), and `transition_at` (UTC ISO-8601).
-
-### 2.4 Scheduled Job Learning (`hq/aiops/scheduled_jobs.py`)
-- **Problem:** Periodic cron jobs (e.g. backup, report generation) trigger recurring CPU spikes that cause alert fatigue.
-- **Algorithm:**
-  - Track timestamps of metric spikes ($|z| \ge 3$) per `(tenant_id, source, metric)`.
-  - Calculate inter-spike intervals: $\Delta t_1, \Delta t_2, \Delta t_3$.
-  - If 3 consecutive intervals match within $\pm 10\%$ tolerance (e.g. $60\text{ s} \pm 6\text{ s}$), establish a **Learned Scheduled Job**.
-- **Action:** Future spikes occurring within the expected window are classified as `info: scheduled job (every ~N s)` and suppressed from opening incidents, with the suppression reason displayed. Off-schedule spikes still alert immediately.
-
-### 2.5 Incident Correlation & Kill-Chain Engine (`hq/aiops/correlator.py`)
-- **Incident Grouping Window:** 120 seconds for same tenant + related topology component. Repeated signals increment a counter rather than creating duplicate alerts.
-- **Kill-Chain Rule ("Possible compromise: cryptomining"):**
-  1. `auth_failure_burst` (burst of failed logins)
-  2. Followed by `login_after_failures` or `odd_hour_login` within 10 min
-  3. Followed by `cpu_pct` anomaly ($|z| \ge 3$) within 10 min
-  4. Followed by `net_out_kbps` anomaly ($|z| \ge 3$) within 10 min
-  $\rightarrow$ Merges all 4 into **1 Critical Incident**.
-- **Change Event Correlation ("What changed just before"):**
-  - Guard sends change events: `app_restarted`, `version_changed`, `config_changed`, `new_process`.
-  - Any change occurring within 5 minutes prior to the first incident signal is linked as likely trigger (e.g., *"started 40 s after shop-api restarted"*) and adds $+0.10$ to confidence.
-- **Mathematical Formulations:**
-  - **Confidence:**
-    $$\text{Confidence} = \min\left(0.95, 0.40 + 0.15 \times N_{\text{agreeing}} + (0.10 \text{ if rule matched}) + (0.10 \text{ if change linked})\right)$$
-  - **Signal Contribution Percentage:**
-    $$\text{Contribution}_i = \frac{|z_i|}{\sum_j |z_j|} \times 100\%$$
-    (or event count ratio for discrete event categories).
-  - **Counterfactual Reasoning:**
-    Deterministic re-evaluation: re-run the health evaluation rule omitting signal $i$. If the resulting state would be lower, generate the counterfactual explanation (e.g. *"Without the outbound spike this would be a High security incident, not Critical"*).
-
-### 2.6 Incident Object Specification
-```json
-{
-  "incident_id": "inc-0042",
-  "tenant_id": "globex",
-  "title": "Possible compromise: cryptomining",
-  "severity": "critical",
-  "confidence": 0.85,
-  "started_at": "2026-11-21T04:10:02Z",
-  "affected": ["host-7f3a1234", "shop-api", "checkout"],
-  "signals": [
-    {"evidence_id": "ev-1", "name": "auth_failure_burst", "value": 50, "baseline": 2, "contribution_pct": 35},
-    {"evidence_id": "ev-2", "name": "cpu_pct", "value": 96.0, "baseline": 21.0, "z": 7.4, "contribution_pct": 40},
-    {"evidence_id": "ev-3", "name": "net_out_kbps", "value": 900.0, "baseline": 40.0, "z": 5.1, "contribution_pct": 25}
-  ],
-  "reasoning_path": [
-    "login burst at 04:10",
-    "login success at 04:11",
-    "CPU anomaly at 04:12",
-    "outbound spike at 04:12",
-    "kill-chain rule matched"
-  ],
-  "counterfactual": "Without the outbound spike this would be a High security incident, not Critical",
-  "recommendation": {
-    "action": "kill_process",
-    "target": "proc-1a2b3c4d",
-    "why": "Process started after suspicious login and consumes 90% CPU",
-    "risk": "low",
-    "reversible": true,
-    "rollback": "Restart shop-api if affected"
-  },
-  "narrative": "At 04:10 UTC, host-7f3a1234 suffered an auth failure burst (50 attempts [ev-1]). A login succeeded at 04:11 UTC followed by a CPU spike to 96% [ev-2] and outbound network spike of 900 kbps [ev-3]. This pattern matches the cryptomining kill-chain rule."
-}
-```
+## 1. System Identity & Context
+- **Role:** Tier 1 Tenant Environment & Guard Engineer (**Role G**)
+- **Tenant ID:** `acme`
+- **Shop Name:** Shop A ("Acme")
+- **Region:** India (`ingest-in`, primary endpoint `http://localhost:8001`)
+- **Timezone:** `Asia/Kolkata`
+- **Host Machine:** Windows (Ryzen AI 7 350 / Local PC)
+- **Primary Ports:**
+  - `shop-api`: Port `7000`
+  - `guard` + Local UI API: Port `9000`
+  - `chaos agent`: Port `9100`
+  - `toxiproxy`: Port `8474` (optional network simulation)
+  - `lemonade` (Shop AI): Port `13305` (or local CPU fallback)
 
 ---
 
-## 3. Simulator Tool Specification (`tools/simulate.py`)
-
-Must run as an asynchronous multi-guard simulator generating cryptographically valid, schema-compliant `airlock.v1` payloads:
-- **CLI Options:**
-  - `--guards N`: Number of concurrent guards to simulate.
-  - `--tenants`: Tenant list (e.g. `acme,globex,contoso`).
-  - `--interval`: Post interval in seconds (default: 2.0).
-  - `--endpoint`: Ingest URL (default: `http://localhost:8002/ingest`).
-  - `--secret`: HMAC signing key.
-- **Scenario Switches:**
-  - `--scenario normal`: Normal baseline telemetry ($|z| < 1.5$).
-  - `--scenario cpu_spike`: Injects CPU spike ($>95\%$) on target guard.
-  - `--scenario latency`: Injects latency ($>500\text{ ms}$) and packet loss ($>5\%$).
-  - `--scenario login_burst`: Emits `auth_failure_burst` (count=50) with honeypot user `admin_backup`.
-  - `--scenario outage`: Halts transmissions for 35s to trigger stale (10s) and offline (30s) state transitions.
-  - `--scenario duplicates`: Sends replayed payloads with identical `payload_id` to verify deduplication.
-  - `--scenario out_of_order`: Shuffles window timestamps to verify event-time ordering.
-  - `--scenario kill_chain`: Executes 4-stage sequential progression (login burst $\rightarrow$ login success $\rightarrow$ CPU spike $\rightarrow$ network out spike).
-  - `--scenario scheduled_job`: Generates predictable CPU spikes every 60 seconds to demonstrate learned job suppression.
+## 2. Shared Contracts (`contracts/`)
+Tenant 1 adheres strictly to frozen protocol contracts shared across Tier 1 and Tier 2:
+- **`contracts/payload.schema.json`**: Strict JSON Schema for `airlock.v1` telemetry payloads (`additionalProperties: false`).
+- **`contracts/models.py`**: Pydantic v2 data models with `model_config = ConfigDict(extra="forbid")`:
+  - `MetricItem`: `name` (enum of allowed metrics), `source` (`host-*` pseudonym), `avg`, `max`.
+  - `EventItem`: `category` (enum of allowed events), `severity` (`info|low|medium|high|critical`), `source`, `actor`, `count`, `window_s`.
+  - `LogPatternItem`: `pattern_id`, `level`, `count`, `is_new`.
+  - `HealthInfo`: `guard_version`, `guard_cpu_pct`, `guard_mem_mb`, `buffer_depth`, `config_ok`, `canaries_planted`, `secrets_redacted`.
+  - `PayloadV1`: Root envelope with `schema="airlock.v1"`, `payload_id`, `tenant_id="acme"`, `guard_id`, `seq`, `prev_hash`, `policy_version`, `sent_at`, `window`, metrics, events, log_patterns, health.
+  - `SignedReceipt`: `payload_id`, `sha256`, `received_at`, `status` (`stored|duplicate`).
+  - `ActionIntent`: Remediation payload (`action_id`, `tenant_id`, `action`, `target`, `dry_run`, `signature`).
 
 ---
 
-## 4. Head-Office AI Assistant Specification (`hq/ai/`)
+## 3. Target Application: `shop-api/` (Port 7000)
+A realistic demo e-commerce service designed to simulate real customer operations and generate telemetry:
+1. **API Endpoints:**
+   - `GET /health`: Service health status and uptime.
+   - `POST /auth/login`: User authentication with failure tracking (records source IP, username, latency).
+   - `GET /catalog`: Fetch product list.
+   - `POST /cart/checkout`: Process purchase, logs transaction IDs, billing metadata, simulated credit card/auth tokens.
+   - `POST /chaos/inject-log`: Receives arbitrary strings to demonstrate secret redaction and pattern mining.
+2. **Local Logging:**
+   - Writes rich structured logs to `shop-api/logs/shop.log`.
+   - Generates realistic logs with sensitive tokens, passwords, and raw customer data intended to test local scrubbing.
 
-- **Model:** Ollama `qwen3.5:4b` (fallback `qwen2.5`) via standard OpenAI Python client.
-- **Evidence-Only System Prompt:**
-  1. The assistant has access ONLY to the incident JSON and 10-minute metric summary for the logged-in tenant.
-  2. Every technical assertion MUST cite an `evidence_id` in brackets (e.g. `[ev-1]`).
-  3. If asked for information not present in the payload (passwords, raw logs, real IPs, customer data), it MUST respond: *"I do not have access to that information. Raw customer data never leaves the customer environment."*
-- **Incident Narrative Generation:**
-  - Triggered automatically when an incident is opened.
-  - Translates the structured `reasoning_path`, `signals`, and `counterfactual` into a 3-sentence executive summary.
+---
+
+## 4. Privacy Guard: `guard/` (Port 9000)
+The heart of Tenant 1. A standalone, outbound-only observability daemon.
+
+### 4.1 Telemetry Collection Pipeline
+- **Frequency:** Every 2.0 seconds window.
+- **Metrics Collected (`psutil` & local probes):**
+  - Host CPU usage (`cpu_pct`), memory usage (`mem_pct`), disk usage (`disk_pct`).
+  - Network I/O rate (`net_in_kbps`, `net_out_kbps`).
+  - TCP latency & packet loss probes to local gateway / head-office endpoint.
+  - HTTP probe to `shop-api` health endpoint (`service_up`).
+  - Battery status via `psutil.sensors_battery()`: `battery_pct`, `on_battery`, `battery_min_left`.
+- **Log Collection:**
+  - Tailing `shop-api/logs/shop.log`.
+
+### 4.2 Local Raw Store (`raw_store.py`)
+- SQLite database (`data/raw.db`).
+- Stores raw log entries and un-aggregated metrics locally for 24 hours.
+- Strict retention policy: automatic deletion after 24 hours with active countdown.
+- **Zero Raw Data Egress:** Raw lines NEVER leave `raw.db` across the trust boundary.
+
+### 4.3 Redaction & Canary Tripwires (`scrubber.py`)
+- Regex and pattern scrubbers masking AWS keys (`AKIA...`), JWT tokens, basic auth passwords, and bearer tokens.
+- **Canary Planter:** Every 30 seconds, injects synthetic canary secrets (`AKIACANARY...`) into the local raw stream.
+- **Pre-send Verifier:** Verifies that no payload contains any canary string or unmasked secret pattern before transmission.
+
+### 4.4 Pattern Mining (`pattern_miner.py`)
+- Integrated **Drain3** algorithm to parse free-text log messages into structured pattern templates (e.g. `tpl-3fa1`) and track frequency counts.
+- Flags `is_new: true` when a previously unseen pattern appears.
+
+### 4.5 Local Anomaly & Behavioral Detectors (`detectors.py`)
+- **Login Burst Detector:** Triggers `auth_failure_burst` event if >30 failed attempts occur within 60s.
+- **Honeypot Trap:** Instant `honeypot_hit` critical event if authentication is attempted for trap user `admin_backup`.
+- **Odd-Hour Login:** Detects logins at 3:00 AM shop local time (`Asia/Kolkata`).
+- **Power Failure:** Triggers `power_on_battery` event on charger disconnection.
+- **Change Tracker:** Emits `app_restarted`, `config_changed`, or `new_process` metadata events.
+
+### 4.6 Pseudonymization Engine (`pseudonymizer.py`)
+- Deterministic HMAC-SHA256 keyed with tenant secret `TENANT_SECRET_KEY`.
+- Formats:
+  - Hostnames -> `host-[0-9a-f]{8}`
+  - Source IPs / Actors -> `src-[0-9a-f]{8}`
+  - Usernames -> `user-[0-9a-f]{8}`
+  - Process PIDs / names -> `proc-[0-9a-f]{8}`
+- Stores bidirectional mapping exclusively in local SQLite table (`reveal.db`) for permissioned reveal requests.
+
+### 4.7 Hash-Chained Egress Ledger & Outbox (`ledger.py`)
+- Hash chain integrity: Each payload references `prev_hash: "sha256:..."` and calculates its own SHA-256.
+- Monotonically increasing sequence number `seq`.
+- Persistent SQLite Outbox queue:
+  - If network or regional ingest is unreachable, buffers payloads locally in FIFO sequence.
+  - Zero loss, zero duplicate transmission.
+  - Exponential backoff retry (1s, 2s, 4s, 8s, max 10s).
+- Receipt reconciliation: Updates local ledger row status to `CONFIRMED` upon receiving valid signed receipt from Head Office.
+
+### 4.8 Receipt-Log Checkpoint Generator (`checkpoints.py`)
+- Every 60 seconds, calculates cumulative SHA-256 root over all transmitted payload hashes up to sequence `N`.
+- Exposes `{guard_id, up_to_seq, root}` for sent-vs-received matching against Head Office.
+
+### 4.9 Remediation Executor (`executor.py`)
+- Pulls signed action intents from Head Office (`GET /actions/pending` or webhook).
+- **Policy Gate:** Enforces tenant permission rules:
+  - Allowed actions: `kill_process`, `restart_service`, `block_source`, `dry_run`.
+  - Rate limiting (max 3 actions per 10 minutes).
+- Resolves pseudonyms (`proc-1a2b3c4d`) to real local targets via local reveal table.
+- **Dry-run Mode:** Returns exact projected impact without making changes.
+- **Execution & Rollback:**
+  - Kills runaway processes or restarts `shop-api`.
+  - Starts 120s rollback timer; escalates or rolls back if service does not return to healthy state.
+  - Logs all actions to local audit table.
+
+### 4.10 Local Shop Screen API (`api.py` on Port 9000)
+- `GET /api/status`: Guard health, buffer depth, version, retention countdown.
+- `GET /api/raw-logs`: Displays raw logs with secrets and raw data visible (Shop only!).
+- `GET /api/egress`: Egress proof panel displaying exact JSON sent, SHA-256, and receipt status.
+- `GET /api/reveal-requests`: View pending pseudonym reveal requests from Head Office.
+- `POST /api/reveal-requests/{id}/approve`: Shop admin approves reveal; value displayed only on local screen.
+- `GET /api/checkpoint`: Running 60-second checkpoint root hash.
+
+### 4.11 Shop AI Assistant (`shop_ai.py`)
+- Connects to local Lemonade server on port 13305 (or CPU fallback).
+- Implements OpenAI tool-calling interface with tools:
+  - `search_raw_logs(query, minutes)`
+  - `recent_auth_failures(minutes)`
+- Answers tenant operator queries based on local raw logs without exposing data to Head Office.
+
+---
+
+## 5. Local Chaos Agent: `chaos/` (Port 9100)
+Allows triggerable scenarios for live hackathon evaluation:
+- `POST /chaos/cpu-spike`: Consumes high CPU to simulate cryptominer or runaway process.
+- `POST /chaos/latency`: Injects artificial network latency.
+- `POST /chaos/brute-force`: Simulates 50 failed login attempts.
+- `POST /chaos/inject-secret`: Injects passwords and API keys into the raw shop log.
+- `POST /chaos/power-cut`: Simulates battery operation.
+- `POST /chaos/restart-shop`: Restarts `shop-api` to trigger change event correlation.
+
+---
+
+## 6. Pre-requisites & Environment
+- **Python:** 3.11+ / 3.14 via `py` launcher.
+- **Dependencies:** `fastapi`, `uvicorn`, `pydantic>=2.0`, `psutil`, `httpx`, `drain3`, `detect-secrets`, `pytest`, `python-dotenv`.
+- **Environment Configuration (`.env`):**
+  - `TENANT_ID=acme`
+  - `GUARD_ID=guard-acme-01`
+  - `SHOP_API_PORT=7000`
+  - `GUARD_PORT=9000`
+  - `CHAOS_PORT=9100`
+  - `INGEST_URL=http://localhost:8001/v1/ingest`
+  - `GUARD_SECRET_KEY=secret-guard-acme-key-350`
+  - `TENANT_SECRET_KEY=tenant-acme-hmac-salt-99`
+  - `TIMEZONE=Asia/Kolkata`
