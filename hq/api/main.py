@@ -391,4 +391,6 @@ async def websocket_live_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("hq.api.main:app", host="0.0.0.0", port=port, reload=False)
+    ssl_key = os.getenv("SSL_KEYFILE")
+    ssl_cert = os.getenv("SSL_CERTFILE")
+    uvicorn.run("hq.api.main:app", host="0.0.0.0", port=port, ssl_keyfile=ssl_key, ssl_certfile=ssl_cert, reload=False)

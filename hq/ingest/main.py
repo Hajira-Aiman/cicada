@@ -107,4 +107,6 @@ app = create_ingest_app(region=default_region)
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8002" if default_region == "eu" else "8001"))
-    uvicorn.run("hq.ingest.main:app", host="0.0.0.0", port=port, reload=False)
+    ssl_key = os.getenv("SSL_KEYFILE")
+    ssl_cert = os.getenv("SSL_CERTFILE")
+    uvicorn.run("hq.ingest.main:app", host="0.0.0.0", port=port, ssl_keyfile=ssl_key, ssl_certfile=ssl_cert, reload=False)
