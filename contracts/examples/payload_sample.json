@@ -1,0 +1,56 @@
+{
+  "schema": "airlock.v1",
+  "payload_id": "0193f2c1-7b5e-7c3a-9f10-4be2a1d0c9e1",
+  "tenant_id": "globex",
+  "guard_id": "guard-globex-01",
+  "seq": 1042,
+  "prev_hash": "sha256:9c1e7a08b3c901e2",
+  "policy_version": "sha256:ab1289cf001e35a9",
+  "sent_at": "2026-11-21T04:12:08Z",
+  "window": {
+    "start": "2026-11-21T04:12:04Z",
+    "end": "2026-11-21T04:12:06Z",
+    "source_tz": "Europe/Berlin"
+  },
+  "metrics": [
+    {
+      "name": "cpu_pct",
+      "source": "host-7f3a1234",
+      "avg": 34.2,
+      "max": 51.0
+    },
+    {
+      "name": "latency_ms",
+      "source": "host-7f3a1234",
+      "avg": 18.5,
+      "max": 24.0
+    }
+  ],
+  "events": [
+    {
+      "category": "auth_failure_burst",
+      "severity": "high",
+      "source": "host-7f3a1234",
+      "actor": "src-9c2e0011",
+      "count": 50,
+      "window_s": 60
+    }
+  ],
+  "log_patterns": [
+    {
+      "pattern_id": "tpl-3fa1",
+      "level": "ERROR",
+      "count": 40,
+      "is_new": true
+    }
+  ],
+  "health": {
+    "guard_version": "0.1.0",
+    "guard_cpu_pct": 1.2,
+    "guard_mem_mb": 80.0,
+    "buffer_depth": 0,
+    "config_ok": true,
+    "canaries_planted": 12,
+    "secrets_redacted": 3
+  }
+}

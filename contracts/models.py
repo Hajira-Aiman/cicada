@@ -1,94 +1,85 @@
 """
-Airlock Data Contracts (v1)
-Pydantic v2 models for strict allow-list telemetry envelopes, receipts, and remediation intents.
-Extra fields are strictly forbidden to ensure zero accidental leaks.
+contracts/models.py
+Shared contract models for Airlock (airlock.v1).
+Strict allow-list schema: extra fields are forbidden.
+Free text and unapproved identifiers cannot cross the trust boundary.
 """
 
-from enum import Enum
-from typing import List, Optional
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Annotated, List, Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+
+PSEUDONYM_REGEX = r"^(host|src|user|proc)-[0-9a-f]{8}$"
+Pseudonym = Annotated[str, StringConstraints(pattern=PSEUDONYM_REGEX)]
+
+MetricName = Literal[
+    "cpu_pct",
+    "mem_pct",
+    "disk_pct",
+    "net_in_kbps",
+    "net_out_kbps",
+    "latency_ms",
+    "packet_loss_pct",
+    "service_up",
+    "battery_pct",
+    "on_battery",
+    "battery_min_left",
+]
+
+EventCategory = Literal[
+    "auth_failure_burst",
+    "login_after_failures",
+    "honeypot_hit",
+    "odd_hour_login",
+    "service_down",
+    "new_log_pattern",
+    "log_pattern_spike",
+    "power_on_battery",
+    "secret_redacted",
+    "app_restarted",
+    "version_changed",
+    "config_changed",
+    "new_process",
+]
+
+SeverityLevel = Literal["info", "low", "medium", "high", "critical"]
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+HealthState = Literal["Excellent", "Good", "Fair", "Poor"]
 
 
-class MetricName(str, Enum):
-    CPU_PCT = "cpu_pct"
-    MEM_PCT = "mem_pct"
-    DISK_PCT = "disk_pct"
-    NET_IN_KBPS = "net_in_kbps"
-    NET_OUT_KBPS = "net_out_kbps"
-    LATENCY_MS = "latency_ms"
-    PACKET_LOSS_PCT = "packet_loss_pct"
-    SERVICE_UP = "service_up"
-    BATTERY_PCT = "battery_pct"
-    ON_BATTERY = "on_battery"
-    BATTERY_MIN_LEFT = "battery_min_left"
-
-
-class EventCategory(str, Enum):
-    AUTH_FAILURE_BURST = "auth_failure_burst"
-    LOGIN_AFTER_FAILURES = "login_after_failures"
-    HONEYPOT_HIT = "honeypot_hit"
-    ODD_HOUR_LOGIN = "odd_hour_login"
-    SERVICE_DOWN = "service_down"
-    NEW_LOG_PATTERN = "new_log_pattern"
-    LOG_PATTERN_SPIKE = "log_pattern_spike"
-    POWER_ON_BATTERY = "power_on_battery"
-    SECRET_REDACTED = "secret_redacted"
-    APP_RESTARTED = "app_restarted"
-    VERSION_CHANGED = "version_changed"
-    CONFIG_CHANGED = "config_changed"
-    NEW_PROCESS = "new_process"
-
-
-class Severity(str, Enum):
-    INFO = "info"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-
-
-class LogLevel(str, Enum):
-    DEBUG = "DEBUG"
-    INFO = "INFO"
-    WARNING = "WARNING"
-    ERROR = "ERROR"
-    CRITICAL = "CRITICAL"
-
-
-class WindowInfo(BaseModel):
+class TimeWindow(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    start: str = Field(description="ISO 8601 UTC timestamp")
-    end: str = Field(description="ISO 8601 UTC timestamp")
-    source_tz: str = Field(default="Asia/Kolkata", description="Source timezone name")
+    start: str  # ISO-8601 UTC with Z (e.g. 2026-11-21T04:12:04Z)
+    end: str    # ISO-8601 UTC with Z
+    source_tz: str  # e.g. Europe/Berlin or Asia/Kolkata
 
 
-class MetricItem(BaseModel):
+class MetricSample(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: MetricName
-    source: str = Field(pattern=r"^(host|src|user|proc)-[0-9a-f]{8}$")
+    source: Pseudonym
     avg: float
     max: float
 
 
-class EventItem(BaseModel):
+class EventSample(BaseModel):
     model_config = ConfigDict(extra="forbid")
     category: EventCategory
-    severity: Severity
-    source: str = Field(pattern=r"^(host|src|user|proc)-[0-9a-f]{8}$")
-    actor: Optional[str] = Field(default=None, pattern=r"^(host|src|user|proc)-[0-9a-f]{8}$")
+    severity: SeverityLevel
+    source: Pseudonym
+    actor: Optional[Pseudonym] = None
     count: int = Field(ge=1)
-    window_s: int = Field(ge=1)
+    window_s: Optional[int] = Field(default=None, ge=1)
 
 
-class LogPatternItem(BaseModel):
+class LogPatternSample(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    pattern_id: str = Field(pattern=r"^tpl-[0-9a-f]{4,16}$")
+    pattern_id: str = Field(pattern=r"^tpl-[0-9a-fA-F]+$")
     level: LogLevel
     count: int = Field(ge=1)
     is_new: bool = False
 
 
-class HealthInfo(BaseModel):
+class GuardHealth(BaseModel):
     model_config = ConfigDict(extra="forbid")
     guard_version: str
     guard_cpu_pct: float
@@ -99,53 +90,113 @@ class HealthInfo(BaseModel):
     secrets_redacted: int = Field(ge=0)
 
 
-class PayloadV1(BaseModel):
-    """
-    Airlock v1 telemetry envelope.
-    Strict allow-list: extra='forbid' prevents unlisted fields from leaving the environment.
-    """
+class AirlockPayload(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    schema_version: str = Field(default="airlock.v1", alias="schema")
-    payload_id: str = Field(description="UUID v4 identifier")
+    schema_version: Literal["airlock.v1"] = Field(
+        default="airlock.v1",
+        alias="schema",
+        serialization_alias="schema",
+    )
+    payload_id: str
     tenant_id: str
     guard_id: str
-    seq: int = Field(ge=1)
-    prev_hash: str = Field(description="SHA-256 of preceding payload or 'GENESIS'")
+    seq: int = Field(ge=0)
+    prev_hash: str
     policy_version: str
-    sent_at: str = Field(description="ISO 8601 UTC timestamp")
-    window: WindowInfo
-    metrics: List[MetricItem] = Field(default_factory=list)
-    events: List[EventItem] = Field(default_factory=list)
-    log_patterns: List[LogPatternItem] = Field(default_factory=list)
-    health: HealthInfo
+    sent_at: str  # ISO-8601 UTC with Z
+    window: TimeWindow
+    metrics: List[MetricSample] = Field(default_factory=list)
+    events: List[EventSample] = Field(default_factory=list)
+    log_patterns: List[LogPatternSample] = Field(default_factory=list)
+    health: GuardHealth
 
 
-class SignedReceipt(BaseModel):
+class IngestReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payload_id: str
     sha256: str
-    received_at: str
-    status: str = Field(description="'stored' or 'duplicate'")
-
-
-class ActionType(str, Enum):
-    KILL_PROCESS = "kill_process"
-    RESTART_SERVICE = "restart_service"
-    BLOCK_SOURCE = "block_source"
-    DRY_RUN = "dry_run"
+    received_at: str  # ISO-8601 UTC with Z
+    status: Literal["stored", "duplicate"]
 
 
 class ActionIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action_id: str
+    intent_id: str
     tenant_id: str
-    action: ActionType
-    target: str = Field(pattern=r"^(host|src|user|proc)-[0-9a-f]{8}$|^shop-api$")
-    why: str
-    risk: Severity = Severity.LOW
-    reversible: bool = True
-    rollback: str
-    dry_run: bool = False
-    issued_at: str
+    action: Literal["kill_process", "block_ip", "restart_service"]
+    target: str
+    timestamp: str  # ISO-8601 UTC with Z
     signature: str
+    rollback_window_s: int = Field(default=120, ge=10)
+
+
+class Checkpoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    guard_id: str
+    up_to_seq: int = Field(ge=0)
+    root: str
+
+
+class SignalEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evidence_id: str
+    name: str
+    value: float
+    baseline: float
+    z: Optional[float] = None
+    contribution_pct: float = Field(ge=0.0, le=100.0)
+
+
+class ActionRecommendation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["kill_process", "block_ip", "restart_service", "investigate"]
+    target: Optional[str] = None
+    why: str
+    risk: Literal["low", "medium", "high"]
+    reversible: bool
+    rollback: Optional[str] = None
+
+
+class Incident(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    incident_id: str
+    tenant_id: str
+    title: str
+    severity: SeverityLevel
+    confidence: float = Field(ge=0.0, le=1.0)
+    started_at: str  # ISO-8601 UTC with Z
+    affected: List[str] = Field(default_factory=list)
+    signals: List[SignalEvidence] = Field(default_factory=list)
+    reasoning_path: List[str] = Field(default_factory=list)
+    counterfactual: Optional[str] = None
+    recommendation: Optional[ActionRecommendation] = None
+    narrative: Optional[str] = None
+
+
+class HealthTransition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tenant_id: str
+    source: Pseudonym
+    old_state: HealthState
+    new_state: HealthState
+    reasons: List[str]
+    transition_at: str  # ISO-8601 UTC with Z
+
+
+class RevealRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str
+    tenant_id: str
+    pseudonym: Pseudonym
+    requested_by: str
+    reason: str
+    requested_at: str  # ISO-8601 UTC with Z
+    status: Literal["pending", "approved", "rejected"] = "pending"
+
+
+class WSMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    event_type: Literal["metrics_batch", "health_change", "incident_alert", "receipt_ack"]
+    tenant_id: str
+    timestamp: str  # ISO-8601 UTC with Z
+    payload: dict

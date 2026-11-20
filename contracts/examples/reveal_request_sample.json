@@ -1,0 +1,9 @@
+{
+  "request_id": "rev-0042",
+  "tenant_id": "globex",
+  "pseudonym": "src-9c2e0011",
+  "requested_by": "operator-adithya",
+  "reason": "Investigating kill-chain cryptomining alert",
+  "requested_at": "2026-11-21T04:16:00Z",
+  "status": "pending"
+}

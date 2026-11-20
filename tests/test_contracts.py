@@ -103,16 +103,13 @@ def test_signed_receipt_model():
 
 def test_action_intent_model():
     intent = ActionIntent(
-        action_id="act-1234",
+        intent_id="act-1234",
         tenant_id="acme",
-        action=ActionType.KILL_PROCESS,
+        action="kill_process",
         target="proc-1a2b3c4d",
-        why="High CPU anomaly detected",
-        risk=Severity.LOW,
-        reversible=True,
-        rollback="Restart shop-api",
-        dry_run=True,
-        issued_at="2026-11-21T04:12:10Z",
+        timestamp="2026-11-21T04:12:10Z",
         signature="sig-hmac-test",
+        rollback_window_s=120,
     )
-    assert intent.dry_run is True
+    assert intent.action == "kill_process"
+    assert intent.rollback_window_s == 120

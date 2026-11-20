@@ -1,14 +1,13 @@
 """
 guard/config.py
 Configuration loader reading environment variables with .env support.
-Zero hardcoded IPs or secrets.
+Zero hardcoded IPs. Pinned to registered secrets from contracts/models.
 """
 
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env file from project root if present
 env_path = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
@@ -16,8 +15,8 @@ load_dotenv(dotenv_path=env_path)
 class GuardConfig:
     TENANT_ID: str = os.getenv("TENANT_ID", "acme")
     GUARD_ID: str = os.getenv("GUARD_ID", "guard-acme-01")
-    REGION_URL: str = os.getenv("INGEST_URL", "http://localhost:8001/v1/ingest")
-    GUARD_SECRET_KEY: str = os.getenv("GUARD_SECRET_KEY", "guard-secret-key-acme-2026")
+    REGION_URL: str = os.getenv("INGEST_URL", "http://localhost:8001/ingest")
+    GUARD_SECRET_KEY: str = os.getenv("GUARD_SECRET_KEY", "sec-acme-super-secret-key-2026")
     TENANT_SECRET_KEY: str = os.getenv("TENANT_SECRET_KEY", "tenant-salt-acme-local-reveal-2026")
     TIMEZONE: str = os.getenv("TIMEZONE", "Asia/Kolkata")
     POLICY_VERSION: str = os.getenv("POLICY_VERSION", "sha256:v1-default-policy")

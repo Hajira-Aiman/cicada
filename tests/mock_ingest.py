@@ -22,6 +22,7 @@ received_payloads = []
 
 
 @mock_ingest_app.post("/v1/ingest", response_model=SignedReceipt)
+@mock_ingest_app.post("/ingest", response_model=SignedReceipt)
 async def ingest_payload(
     request: Request,
     x_guard_id: str = Header(..., alias="X-Guard-ID"),
@@ -34,7 +35,6 @@ async def ingest_payload(
     # 1. Verify HMAC Signature
     is_valid = verify_payload_signature(
         body_bytes=body,
-        timestamp_iso=x_timestamp,
         signature=x_signature,
         secret_key=config.GUARD_SECRET_KEY,
     )
