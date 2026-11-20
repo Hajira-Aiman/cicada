@@ -15,6 +15,7 @@ from starlette.testclient import TestClient
 from starlette.responses import Response
 from fastapi import FastAPI
 from guard.thin_slice import GuardThinSlice
+from guard.config import GuardConfig
 from guard.signer import create_auth_headers
 from tests.mock_ingest import mock_ingest_app, received_payloads
 
@@ -48,7 +49,7 @@ def test_thin_slice_collection_and_signing():
         assert payload.prev_hash == "GENESIS"
         assert payload.window.source_tz == "Asia/Kolkata"
 
-        # Assert required metrics: cpu_pct, mem_pct, disk_pct, net_in_kbps, net_out_kbps, service_up, latency_ms
+        # Assert required metrics: cpu_pct, mem_pct, disk_pct, net_in_kbps, net_out_kbps, service_up, latency_ms, packet_loss_pct
         metric_names = [m.name for m in payload.metrics]
         assert "cpu_pct" in metric_names
         assert "mem_pct" in metric_names
@@ -57,6 +58,18 @@ def test_thin_slice_collection_and_signing():
         assert "net_out_kbps" in metric_names
         assert "service_up" in metric_names
         assert "latency_ms" in metric_names
+        assert "packet_loss_pct" in metric_names
+
+        # Verify source naming: host pseudonym for host metrics, shop-api pseudonym for service metrics
+        m_sources = {m.name: m.source for m in payload.metrics}
+        assert m_sources["cpu_pct"] == guard.host_pseudonym
+        assert m_sources["mem_pct"] == guard.host_pseudonym
+        assert m_sources["disk_pct"] == guard.host_pseudonym
+        assert m_sources["net_in_kbps"] == guard.host_pseudonym
+        assert m_sources["net_out_kbps"] == guard.host_pseudonym
+        assert m_sources["service_up"] == guard.service_pseudonyms["shop-api"]
+        assert m_sources["latency_ms"] == guard.service_pseudonyms["shop-api"]
+        assert m_sources["packet_loss_pct"] == guard.service_pseudonyms["shop-api"]
 
         # Check metric values are valid floats
         for m in payload.metrics:
@@ -220,3 +233,36 @@ def test_reject_tampered_signature():
         corrupted_headers["X-Airlock-Signature"] = "0" * 64
         res2 = client.post("/ingest", content=body_bytes, headers=corrupted_headers)
         assert res2.status_code == 401
+
+
+def test_packet_loss_probe_and_network_stop(tmp_path):
+    """
+    Verifies real packet loss probing:
+    - Normal operation reports packet_loss_pct (0.0 to 100.0) on shop-api pseudonym
+    - Network stoppage (Toxiproxy / down target) makes it rise within 2 windows
+    """
+    cfg = GuardConfig()
+    cfg.GUARD_DB_PATH = str(tmp_path / "g_pkt.db")
+    cfg.RAW_DB_PATH = str(tmp_path / "r_pkt.db")
+    cfg.REVEAL_DB_PATH = str(tmp_path / "rev_pkt.db")
+    cfg.SHOP_LOG_PATH = str(tmp_path / "shop_pkt.log")
+
+    guard = GuardThinSlice(cfg=cfg)
+
+    # 1. Normal network operation
+    guard.set_packet_loss_override(0.0)
+    p1, _ = guard.collect_window(duration_seconds=1.0)
+    loss1 = next(m.avg for m in p1.metrics if m.name == "packet_loss_pct")
+    assert loss1 == 0.0
+
+    # 2. Window 1 of network interruption (Toxiproxy stops network)
+    guard.set_packet_loss_override(80.0)
+    p2, _ = guard.collect_window(duration_seconds=1.0)
+    loss2 = next(m.avg for m in p2.metrics if m.name == "packet_loss_pct")
+    assert loss2 == 80.0
+
+    # 3. Window 2 of network interruption: rises to 100% loss
+    guard.set_packet_loss_override(100.0)
+    p3, _ = guard.collect_window(duration_seconds=1.0)
+    loss3 = next(m.avg for m in p3.metrics if m.name == "packet_loss_pct")
+    assert loss3 == 100.0

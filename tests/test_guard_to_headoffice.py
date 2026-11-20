@@ -55,11 +55,12 @@ def test_guard_to_headoffice_ingest_in():
         # Verify metrics table rows
         cur.execute("SELECT name, source, avg, max FROM metrics WHERE payload_id = ?", (payload.payload_id,))
         metric_rows = cur.fetchall()
-        assert len(metric_rows) >= 3  # cpu_pct, service_up, latency_ms
+        assert len(metric_rows) >= 4  # cpu_pct, service_up, latency_ms, packet_loss_pct
         names = [r[0] for r in metric_rows]
         assert "cpu_pct" in names
         assert "service_up" in names
         assert "latency_ms" in names
+        assert "packet_loss_pct" in names
 
 
 def test_guard_to_headoffice_ingest_eu():

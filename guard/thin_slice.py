@@ -16,6 +16,7 @@ import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 import psutil
 import httpx
 
@@ -83,7 +84,7 @@ class GuardThinSlice:
             "shop-api": self.pseudonym_mgr.get_or_create("proc", "shop-api"),
             "login": self.pseudonym_mgr.get_or_create("proc", "login"),
             "checkout": self.pseudonym_mgr.get_or_create("proc", "checkout"),
-            "db": self.pseudonym_mgr.get_or_create("proc", "database"),
+            "db": self.pseudonym_mgr.get_or_create("proc", "db"),
         }
 
         # Local AIOps Detectors (T9, T13, T19)
@@ -164,7 +165,7 @@ class GuardThinSlice:
             raw_username=raw_username,
             raw_ip=raw_ip,
             success=success,
-            service_pseudonym=self.service_pseudonyms["shop-api"],
+            service_pseudonym=self.service_pseudonyms["login"],
             timestamp=timestamp,
         )
         self.pending_events.extend(events)
@@ -250,6 +251,53 @@ class GuardThinSlice:
         finally:
             if should_close:
                 client.close()
+
+    def _get_ingest_host_port(self) -> Tuple[str, int]:
+        """Extracts head-office ingest host and port for packet loss probes."""
+        url = getattr(self.config, "REGION_URL", "") or os.getenv("INGEST_URL", "http://127.0.0.1:8001")
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "http://127.0.0.1:8001" + url
+        parsed = urlparse(url)
+        host = parsed.hostname or "127.0.0.1"
+        port = parsed.port or (443 if parsed.scheme == "https" else 8001)
+        return host, port
+
+    def measure_packet_loss(
+        self,
+        host: Optional[str] = None,
+        port: Optional[int] = None,
+        count: int = 10,
+        timeout: float = 0.05,
+    ) -> float:
+        """
+        Sends 10 small TCP connection attempts to the head-office ingest host:port.
+        Reports failed share as a percent (0.0 to 100.0).
+        """
+        override = getattr(self, "_packet_loss_override", None)
+        if override is not None:
+            return float(override)
+
+        if host is None or port is None:
+            h, p = self._get_ingest_host_port()
+            host = host or h
+            port = port or p
+
+        failed = 0
+        for _ in range(count):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(timeout)
+                err = s.connect_ex((host, port))
+                if err != 0:
+                    failed += 1
+                s.close()
+            except Exception:
+                failed += 1
+
+        return round((failed / float(count)) * 100.0, 1)
+
+    def set_packet_loss_override(self, val: Optional[float]):
+        self._packet_loss_override = val
 
     def check_service_up(self, client: Optional[httpx.Client] = None) -> float:
         up, _ = self.probe_shop_health(client=client)
@@ -337,11 +385,22 @@ class GuardThinSlice:
             metrics.append(
                 MetricSample(
                     name="latency_ms",
-                    source=self.host_pseudonym,
+                    source=self.service_pseudonyms["shop-api"],
                     avg=latency_val,
                     max=latency_val,
                 )
             )
+
+        # Real packet loss probe to head-office ingest host:port
+        packet_loss_val = self.measure_packet_loss()
+        metrics.append(
+            MetricSample(
+                name="packet_loss_pct",
+                source=self.service_pseudonyms["shop-api"],
+                avg=packet_loss_val,
+                max=packet_loss_val,
+            )
+        )
 
         # Evaluate power & battery state (T19)
         power_metrics, power_events = self.power_detector.check_power()
@@ -349,7 +408,7 @@ class GuardThinSlice:
         self.pending_events.extend(power_events)
 
         # Evaluate auth bursts (30+ failures in 60s) (T9)
-        burst_events = self.auth_detector.evaluate_bursts(service_pseudonym=self.service_pseudonyms["shop-api"])
+        burst_events = self.auth_detector.evaluate_bursts(service_pseudonym=self.service_pseudonyms["login"])
         self.pending_events.extend(burst_events)
 
         # Evaluate configuration changes (.env hash) (T13)
