@@ -31,16 +31,30 @@ from contracts.models import (
 from guard.config import config
 from guard.pseudonym import generate_pseudonym
 from guard.signer import create_auth_headers
+from guard.ledger import GuardLedger
+from guard.outbox import GuardOutbox
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("airlock-guard")
 
 
 class GuardThinSlice:
-    def __init__(self, cfg=config):
+    def __init__(
+        self,
+        cfg=config,
+        ledger: Optional[GuardLedger] = None,
+        outbox: Optional[GuardOutbox] = None,
+    ):
         self.config = cfg
-        self.seq = 1
-        self.prev_hash = "GENESIS"
+        db_path = getattr(self.config, "GUARD_DB_PATH", "data/guard.db")
+        self.ledger = ledger or GuardLedger(db_path=db_path)
+        self.outbox = outbox or GuardOutbox(db_path=db_path, ledger=self.ledger)
+
+        # Resume state from ledger: contiguous sequence with zero gaps
+        last_seq, last_hash = self.ledger.get_last_seq_and_hash()
+        self.seq = last_seq + 1
+        self.prev_hash = last_hash
+
         self.hostname = socket.gethostname()
         self.host_pseudonym = generate_pseudonym("host", self.hostname, self.config.TENANT_SECRET_KEY)
         self.pending_events: List[EventSample] = []
@@ -245,12 +259,13 @@ class GuardThinSlice:
         proc = psutil.Process(os.getpid())
         guard_cpu = round(proc.cpu_percent(interval=None), 2)
         guard_mem = round(proc.memory_info().rss / (1024 * 1024), 2)
+        current_buffer_depth = self.outbox.get_buffer_depth()
 
         health = GuardHealth(
             guard_version=self.config.GUARD_VERSION,
             guard_cpu_pct=guard_cpu,
             guard_mem_mb=guard_mem,
-            buffer_depth=0,
+            buffer_depth=current_buffer_depth,
             config_ok=True,
             canaries_planted=0,
             secrets_redacted=0,
@@ -289,12 +304,72 @@ class GuardThinSlice:
         body_json = payload.model_dump_json(by_alias=True)
         body_bytes = body_json.encode("utf-8")
 
-        # Update hash chain and sequence for next cycle
-        sha256_hash = hashlib.sha256(body_bytes).hexdigest()
-        self.prev_hash = f"sha256:{sha256_hash}"
+        # Compute SHA-256 and chain
+        sha256_hash = f"sha256:{hashlib.sha256(body_bytes).hexdigest()}"
+
+        # Record to cryptographic ledger and queue in outbox (T11)
+        self.ledger.record_payload(
+            seq=payload.seq,
+            payload_id=payload.payload_id,
+            sha256=sha256_hash,
+            prev_hash=payload.prev_hash,
+            body=body_json,
+            status="pending",
+        )
+        self.outbox.enqueue(
+            seq=payload.seq,
+            payload_id=payload.payload_id,
+            sha256=sha256_hash,
+            body=body_json,
+        )
+
+        self.prev_hash = sha256_hash
         self.seq += 1
 
         return payload, body_bytes
+
+    def drain_outbox(
+        self,
+        client: Optional[httpx.Client] = None,
+        ignore_backoff: bool = False,
+    ) -> Tuple[int, int]:
+        """
+        Drains the outbox in oldest-first order (seq ASC) with backoff.
+        """
+        def _send(payload_id: str, body_bytes: bytes, client_obj: Optional[httpx.Client]):
+            try:
+                p_data = json.loads(body_bytes.decode("utf-8"))
+                sent_at = p_data.get("sent_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:
+                sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            headers = create_auth_headers(
+                guard_id=self.config.GUARD_ID,
+                body_bytes=body_bytes,
+                timestamp_iso=sent_at,
+                secret_key=self.config.GUARD_SECRET_KEY,
+            )
+            should_close = False
+            if client_obj is None:
+                client_obj = httpx.Client(timeout=self.config.TIMEOUT_SECONDS)
+                should_close = True
+            try:
+                resp = client_obj.post(
+                    self.config.REGION_URL,
+                    content=body_bytes,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return IngestReceipt.model_validate(data)
+            except Exception as exc:
+                logger.warning(f"Failed sending payload {payload_id} to {self.config.REGION_URL}: {exc}")
+                return None
+            finally:
+                if should_close:
+                    client_obj.close()
+
+        return self.outbox.drain(send_fn=_send, client=client, ignore_backoff=ignore_backoff)
 
     def send_payload(
         self,
@@ -303,47 +378,38 @@ class GuardThinSlice:
         client: Optional[httpx.Client] = None,
     ) -> Optional[IngestReceipt]:
         """
-        Sends payload to ingest endpoint with canonical X-Airlock-* headers and returns IngestReceipt.
+        Sends payload to ingest endpoint with canonical X-Airlock-* headers,
+        updates cryptographic ledger upon receipt, and returns IngestReceipt.
         """
-        headers = create_auth_headers(
-            guard_id=self.config.GUARD_ID,
-            body_bytes=body_bytes,
-            timestamp_iso=payload.sent_at,
-            secret_key=self.config.GUARD_SECRET_KEY,
-        )
-
-        should_close = False
-        if client is None:
-            client = httpx.Client(timeout=self.config.TIMEOUT_SECONDS)
-            should_close = True
-
-        try:
-            logger.info(
-                f"Sending payload seq={payload.seq - 1} id={payload.payload_id} to {self.config.REGION_URL}"
+        sha256_hash = f"sha256:{hashlib.sha256(body_bytes).hexdigest()}"
+        if not self.ledger.get_row(payload.payload_id):
+            self.ledger.record_payload(
+                seq=payload.seq,
+                payload_id=payload.payload_id,
+                sha256=sha256_hash,
+                prev_hash=payload.prev_hash,
+                body=body_bytes.decode("utf-8"),
+                status="pending",
             )
-            response = client.post(
-                self.config.REGION_URL,
-                content=body_bytes,
-                headers=headers,
+            self.outbox.enqueue(
+                seq=payload.seq,
+                payload_id=payload.payload_id,
+                sha256=sha256_hash,
+                body=body_bytes.decode("utf-8"),
             )
-            response.raise_for_status()
 
-            receipt_data = response.json()
-            receipt = IngestReceipt.model_validate(receipt_data)
-            logger.info(
-                f"Receipt received: payload_id={receipt.payload_id} status={receipt.status} sha256={receipt.sha256}"
+        # Drain outbox with provided client
+        self.drain_outbox(client=client, ignore_backoff=True)
+
+        row = self.ledger.get_row(payload.payload_id)
+        if row and row["status"] in ("stored", "duplicate"):
+            return IngestReceipt(
+                payload_id=row["payload_id"],
+                sha256=row["sha256"],
+                received_at=row["receipt_at"] or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                status=row["status"],
             )
-            return receipt
-
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from Ingest: {e.response.status_code} - {e.response.text}")
-            return None
-        except httpx.RequestError as e:
-            logger.warning(f"Connection failed to {self.config.REGION_URL} ({e}). Payload buffered.")
-            return None
-        finally:
-            if should_close:
-                client.close()
+        return None
 
 
 def run_loop(

@@ -10,6 +10,7 @@ End-to-end verification for Guard Telemetry Collector:
 
 import pytest
 import httpx
+from pathlib import Path
 from starlette.testclient import TestClient
 from starlette.responses import Response
 from fastapi import FastAPI
@@ -21,6 +22,12 @@ from tests.mock_ingest import mock_ingest_app, received_payloads
 @pytest.fixture(autouse=True)
 def clean_received_payloads():
     received_payloads.clear()
+    guard_db = Path("data/guard.db")
+    if guard_db.exists():
+        try:
+            guard_db.unlink()
+        except OSError:
+            pass
 
 
 def test_thin_slice_collection_and_signing():
