@@ -3,7 +3,23 @@ Math decides what is wrong; nothing here calls an LLM. Clock is passed in, so te
 import math
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
-from contracts.models import HealthChange
+
+@dataclass
+class Change:
+    """Committed health transition (lower-case states). to_contract() gives Sahiti's HealthTransition."""
+    tenant_id: str
+    source: str
+    state: str
+    old_state: str | None
+    reasons: list
+    at: str
+
+    def to_contract(self):
+        from contracts.models import HealthTransition
+        cap = lambda x: x.capitalize()  # contract uses Excellent/Good/Fair/Poor; first sighting reports old = new
+        return HealthTransition(tenant_id=self.tenant_id, source=self.source, old_state=cap(self.old_state or self.state),
+                                new_state=cap(self.state), reasons=self.reasons, transition_at=self.at)
+
 
 RANK = {"excellent": 0, "good": 1, "fair": 2, "poor": 3}
 Z_METRICS = {"cpu_pct", "mem_pct", "disk_pct", "net_in_kbps", "net_out_kbps", "latency_ms", "packet_loss_pct"}
@@ -148,7 +164,7 @@ class Engine:
                 if now - st.pending[1] < (th.enter_s if d == "worse" else th.exit_s):
                     return None
         st.committed, st.reasons, st.pending, st.since = raw, reasons, None, now
-        return HealthChange(tenant_id=tenant, source=source, state=raw, old_state=old, reasons=reasons,
+        return Change(tenant_id=tenant, source=source, state=raw, old_state=old, reasons=reasons,
                             at=datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     def evaluate(self, now):

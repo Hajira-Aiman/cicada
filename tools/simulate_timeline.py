@@ -1,12 +1,18 @@
 """Fake guards posting valid, HMAC-signed airlock.v1 payloads every 2 s.
-  python -m tools.simulate --tenants acme globex contoso --scenario cpu_spike:10:20 --scenario outage:40:15
+  python -m tools.simulate_timeline --tenants acme globex contoso --scenario cpu_spike:10:20 --scenario outage:40:15
 Scenario format name[:after_s[:for_s]]; repeat --scenario. Names: cpu_spike latency login_burst outage
 duplicates out_of_order kill_chain backup_job restart_app."""
 import argparse, asyncio, hashlib, random, time, uuid
 from datetime import datetime, timedelta, timezone
 import httpx
-from contracts.models import Payload
-from tools.common import TENANTS, PORTS, sign, pseudo
+import hmac, os
+from contracts.models import AirlockPayload as Payload
+
+# tenant -> (guard_id, region, tz, secret) as registered in scripts/init_postgres.sql
+TENANTS = {t: (f"guard-{t}-01", r, tz, f"sec-{t}-super-secret-key-2026") for t, r, tz in
+           (("acme", "in", "Asia/Kolkata"), ("globex", "eu", "Europe/Berlin"), ("contoso", "in", "Asia/Kolkata"))}
+PORTS = {"in": int(os.getenv("INGEST_IN_PORT", 8001)), "eu": int(os.getenv("INGEST_EU_PORT", 8002))}
+pseudo = lambda kind, v: f"{kind}-{hashlib.sha256(v.encode()).hexdigest()[:8]}"
 
 HOSTS = {t: pseudo("host", t) for t in TENANTS}
 ATTACKER = pseudo("src", "10.6.6.6")
@@ -57,15 +63,16 @@ def build(tenant, seq, prev_hash, win_start, scns, now):
         "seq": seq, "prev_hash": prev_hash, "policy_version": "sha256:sim", "sent_at": iso(datetime.now(timezone.utc)),
         "window": {"start": iso(win_start), "end": iso(win_start + timedelta(seconds=2)), "source_tz": TENANTS[tenant][2]},
         "metrics": metrics, "events": ev,
-        "health": {"guard_version": "sim-0.1", "guard_cpu_pct": 1.0, "guard_mem_mb": 80, "buffer_depth": 0, "config_ok": True}})
+        "health": {"guard_version": "sim-0.1", "guard_cpu_pct": 1.0, "guard_mem_mb": 80, "buffer_depth": 0, "config_ok": True, "canaries_planted": 0, "secrets_redacted": 0}})
 
 
 async def post(client, tenant, body: bytes, host):
-    gid, region, _ = TENANTS[tenant]
+    gid, region, _, secret = TENANTS[tenant]
     ts = iso(datetime.now(timezone.utc))
+    sig = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()  # Sahiti's ingest signs the body only
     try:
         r = await client.post(f"http://{host}:{PORTS[region]}/ingest", content=body, timeout=5, headers={
-            "X-Guard-Id": gid, "X-Timestamp": ts, "X-Signature": sign(gid, ts, body), "Content-Type": "application/json"})
+            "X-Airlock-Guard-ID": gid, "X-Airlock-Timestamp": ts, "X-Airlock-Signature": sig, "Content-Type": "application/json"})
         return r.status_code
     except httpx.HTTPError as e:
         return f"err {type(e).__name__}"
