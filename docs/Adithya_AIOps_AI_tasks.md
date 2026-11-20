@@ -98,14 +98,14 @@ scenarios: cpu_spike, latency, login_burst, outage (stop sending), duplicates, o
 - **Done when:** the CPU-spike button alone gives "usage spike", and CPU + latency gives an incident.
 
 #### T5. Incident grouping + noise counter · PRD #14, §Correlation and noise reduction
-- [ ] Same tenant + related component (topology map) within 120 s → one incident.
-- [ ] Repeats of the same source and signal become a counter, not a new alert.
-- [ ] Header counter: "Raw alerts N → incidents M (x % noise cut)".
+- [x] Same tenant + related component (topology map) within 120 s → one incident.
+- [x] Repeats of the same source and signal become a counter, not a new alert.
+- [x] Header counter: "Raw alerts N → incidents M (x % noise cut)".
 - **Done when:** a burst of related alerts becomes one incident and the counter shows the cut.
 
 #### T6. Contributions + confidence · PRD #14, §Incident object
-- [ ] **Contribution** = each signal's \|z\| (or count ratio for events) as a share of the total.
-- [ ] **Confidence** = 0.4 + 0.15 × agreeing signals + 0.1 if a named rule matched, capped at 0.95. Show the formula on hover.
+- [x] **Contribution** = each signal's \|z\| (or count ratio for events) as a share of the total.
+- [x] **Confidence** = 0.4 + 0.15 × agreeing signals + 0.1 if a named rule matched, capped at 0.95. Show the formula on hover.
 - **Done when:** every incident card has contribution bars and a confidence value you can recompute by hand.
 
 ```text

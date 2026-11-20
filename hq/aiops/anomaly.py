@@ -68,7 +68,7 @@ class Detector:
         for (t, s), st in self.e.src.items():
             if t != tenant:
                 continue
-            for cat, (ts, _sev) in st.events.items():
+            for cat, (ts, _sev, _cnt) in st.events.items():
                 if cat in ERROR_EVENTS and now - ts <= th.event_hold_s:
                     out.append({"name": cat, "source": s, "value": 1.0})
             if st.last.get("service_up", 1) < 1 and now - (st.last_arrival or 0) < th.stale_s:
