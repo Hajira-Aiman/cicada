@@ -41,10 +41,30 @@ _lock = threading.Lock()
 # --- Real Chaos Effect Implementations ---
 
 def _run_cpu_burner(duration_s: float):
-    """Real CPU-burning busy loop pinning 1 core to 100% for duration_s."""
+    """Pins every core but one (the guard needs one) for duration_s (one busy child process per core; a Python thread would only reach one core)."""
+    import subprocess
+    import sys
+    code = f"import time; e = time.time() + {duration_s}; exec('while time.time() < e: pass')"
+    kids = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(max(1, (os.cpu_count() or 2) - 1))]
+    for k in kids:
+        k.wait()
+
+
+def _run_exfil(duration_s: float, rate_kbps: int = 4000):
+    """Real outbound burst: UDP datagrams to a TEST-NET address (RFC 5737, never routed). They still leave through
+    the network card, so the guard's net_out_kbps (psutil NIC counters) really spikes. Nothing is delivered anywhere."""
+    import socket
     end_time = time.time() + duration_s
-    while time.time() < end_time:
-        _ = 3.1415926535 * 2.7182818284 * 1.4142135623
+    chunk = b"x" * 1200
+    per_s = max(1, int(rate_kbps * 1000 / 8 / len(chunk)))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        while time.time() < end_time:
+            for _ in range(per_s // 10):
+                try:
+                    sock.sendto(chunk, ("192.0.2.1", 9))
+                except OSError:
+                    pass
+            time.sleep(0.1)
 
 
 # the attack must hit the shop's own login: the guard reads that log, HQ never sees raw logins
@@ -83,26 +103,29 @@ def _run_backup_job(duration_s: float):
 def _run_kill_chain(duration_s: float):
     """Multi-stage kill chain progression: Recon -> Brute Force -> Resource Exhaustion -> Outbound socket."""
     import httpx
-    step_duration = max(duration_s / 4.0, 1.0)
-    # Stage 1: Recon scan
+    # the guard samples about every 4 s and a flag needs 3 windows, so every stage must last >= 15 s
+    step_duration = max(duration_s / 4.0, 15.0)
+    # Stage 1: recon
     try:
         with httpx.Client(timeout=2.0) as client:
             client.get("http://localhost:8000/api/health")
     except Exception:
         pass
-    time.sleep(step_duration)
+    time.sleep(1)
 
-    # Stage 2: Login burst
-    _run_brute_force(step_duration, SHOP_LOGIN_URL)
-    # a success right after the failures = login_after_failures (the kill chain's second step)
+    # Stage 2: login failure burst against the shop, then a quiet gap so the guard closes the burst
+    _run_brute_force(10, SHOP_LOGIN_URL)
+    time.sleep(6)
+    # a success right after the failures = login_after_failures
     try:
         with httpx.Client(timeout=2.0) as client:
             client.post(SHOP_LOGIN_URL, json={"username": "admin", "password": "securepass2026"})
     except Exception:
         pass
 
-    # Stage 3: High CPU spike
-    _run_cpu_burner(step_duration)
+    # Stage 3: CPU on every core; Stage 4: outbound burst on top of it (miner talking to its pool)
+    threading.Thread(target=lambda: (time.sleep(step_duration), _run_exfil(step_duration, 30000)), daemon=True).start()
+    _run_cpu_burner(step_duration * 2)
 
 
 def _run_region_outage(region: str, duration_s: float):

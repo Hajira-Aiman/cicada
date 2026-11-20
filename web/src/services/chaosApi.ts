@@ -43,7 +43,7 @@ export const chaosApi = {
         body: JSON.stringify({ duration_s: 20 }),
         signal: AbortSignal.timeout(5000),
       });
-      if (res.ok) return { success: true, message: `Scenario ${scenarioId} running for 20 s on ${targetGuard}` };
+      if (res.ok) return { success: true, message: scenarioId === 'kill_chain' ? 'Kill chain running on the shop, takes about 60 s: login burst, CPU, then outbound traffic' : `Scenario ${scenarioId} running for 20 s on ${targetGuard}` };
       return { success: false, message: `Chaos agent refused ${scenarioId}: HTTP ${res.status}` };
     } catch {
       return { success: false, message: `Chaos agent not reachable on ${CHAOS_API_URL}. Start it with: python -m chaos.agent` };
