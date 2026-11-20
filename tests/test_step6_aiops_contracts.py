@@ -219,12 +219,59 @@ def test_tenant_baselines_api(client):
     assert forbidden_res.status_code == 403
 
 
-def test_ai_chat_proxy_fallback(client):
-    """Verify /ai/chat returns readable fallback when AI upstream is offline."""
-    res = client.post("/ai/chat", json={"question": "What is the CPU status?"})
-    assert res.status_code == 200
-    data = res.json()
-    assert "answer" in data
-    assert "evidence_ids" in data
-    assert isinstance(data["evidence_ids"], list)
-    assert "AI Assistant is currently unavailable" in data["answer"]
+def test_ai_chat_proxy_auth_and_fallback(client):
+    """Verify /ai/chat enforces login (401), requires tenant for engineers (400), and returns proper fallback."""
+    # 1. Unauthenticated request -> 401
+    res_no_auth = client.post("/ai/chat", json={"question": "What is the CPU status?"})
+    assert res_no_auth.status_code == 401
+
+    # 2. Engineer login without tenant_id -> 400
+    login_admin = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    assert login_admin.status_code == 200
+    admin_token = login_admin.json()["token"]
+    admin_headers = {"Authorization": f"Bearer {admin_token}"}
+
+    res_eng_no_tenant = client.post(
+        "/ai/chat",
+        json={"question": "What is the CPU status?"},
+        headers=admin_headers,
+    )
+    assert res_eng_no_tenant.status_code == 400
+
+    # 3. Engineer login with explicit tenant_id -> 200 with exact fallback
+    res_eng_with_tenant = client.post(
+        "/ai/chat",
+        json={"question": "What is the CPU status?", "tenant_id": "acme"},
+        headers=admin_headers,
+    )
+    assert res_eng_with_tenant.status_code == 200
+    data_eng = res_eng_with_tenant.json()
+    assert data_eng == {
+        "answer": "The AI service is not reachable right now.",
+        "evidence_ids": [],
+    }
+
+    # 4. Customer login querying different tenant -> 403
+    login_globex = client.post("/api/login", json={"username": "user-globex", "password": "globex123"})
+    assert login_globex.status_code == 200
+    globex_token = login_globex.json()["token"]
+    globex_headers = {"Authorization": f"Bearer {globex_token}"}
+
+    res_cust_wrong_tenant = client.post(
+        "/ai/chat",
+        json={"question": "What is the CPU status?", "tenant_id": "acme"},
+        headers=globex_headers,
+    )
+    assert res_cust_wrong_tenant.status_code == 403
+
+    # 5. Customer login without tenant_id (uses own tenant) -> 200 with fallback
+    res_cust = client.post(
+        "/ai/chat",
+        json={"question": "What is the CPU status?"},
+        headers=globex_headers,
+    )
+    assert res_cust.status_code == 200
+    assert res_cust.json() == {
+        "answer": "The AI service is not reachable right now.",
+        "evidence_ids": [],
+    }

@@ -332,8 +332,18 @@ All streaming messages follow the envelope `{ "event_type": "<type>", "tenant_id
   ```
 
 ### 4.10 AI Assistant Chat: `POST /ai/chat`
-- **Request:** `{"question": "What caused the incident on host-7f3a1234?"}`
-- Proxies with a **20-second timeout** to `http://localhost:8010/chat`.
+- **Authentication:** Requires `Authorization: Bearer <session_token>` (`401` if missing or invalid).
+- **Tenant Context:**
+  - Customers (`role: "customer"`): tenant resolved automatically from authenticated session token.
+  - Engineers (`role: "engineer"`): requires explicit `tenant_id` in request body (`400` if omitted).
+- **Request:**
+  ```json
+  {
+    "question": "What caused the incident on host-7f3a1234?",
+    "tenant_id": "acme"
+  }
+  ```
+- Proxies with a **30-second timeout** to `http://localhost:8010/chat`.
 - **Response (Normal upstream):** `200 OK`
   ```json
   {
@@ -344,7 +354,7 @@ All streaming messages follow the envelope `{ "event_type": "<type>", "tenant_id
 - **Fallback Response (Upstream timeout or offline):** `200 OK`
   ```json
   {
-    "answer": "AI Assistant is currently unavailable. Telemetry indicates normal operation within region for tenant 'acme'.",
+    "answer": "The AI service is not reachable right now.",
     "evidence_ids": []
   }
   ```

@@ -642,16 +642,31 @@ def get_baselines_endpoint(
 
 class ChatRequest(BaseModel):
     question: str
+    tenant_id: Optional[str] = None
 
 
 @app.post("/ai/chat")
 @app.post("/api/ai/chat")
-async def post_ai_chat(req: ChatRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    tenant_id = (user.get("tenant_id") if user else "acme") or "acme"
+async def post_ai_chat(req: ChatRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    role = user.get("role")
+    if role == "engineer":
+        if not req.tenant_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Engineers must specify an explicit tenant_id in request body",
+            )
+        tenant_id = req.tenant_id
+    else:
+        tenant_id = user.get("tenant_id")
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="User has no assigned tenant")
+        if req.tenant_id and req.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Customer cannot query other tenants")
+
     ai_service_url = os.getenv("AI_SERVICE_URL", "http://localhost:8010/chat")
 
     try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             upstream_res = await client.post(
                 ai_service_url,
                 json={"tenant_id": tenant_id, "question": req.question},
@@ -667,7 +682,7 @@ async def post_ai_chat(req: ChatRequest, user: Optional[Dict[str, Any]] = Depend
         pass
 
     return {
-        "answer": f"AI Assistant is currently unavailable. Telemetry indicates normal operation within region for tenant '{tenant_id}'.",
+        "answer": "The AI service is not reachable right now.",
         "evidence_ids": [],
     }
 
