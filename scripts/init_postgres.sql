@@ -62,6 +62,29 @@ CREATE TABLE IF NOT EXISTS reveal_requests (
     decision_reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS action_intents (
+    intent_id VARCHAR(64) PRIMARY KEY,
+    incident_id VARCHAR(64),
+    tenant_id VARCHAR(64) NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    target VARCHAR(128) NOT NULL,
+    risk VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'proposed',
+    details JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    approved_by VARCHAR(128),
+    expires_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE IF NOT EXISTS action_audit (
+    event_id VARCHAR(64) PRIMARY KEY,
+    intent_id VARCHAR(64),
+    actor VARCHAR(128) NOT NULL,
+    step VARCHAR(64) NOT NULL,
+    details JSONB,
+    at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 INSERT INTO region_states (region, is_paused) VALUES ('in', FALSE), ('eu', FALSE)
 ON CONFLICT (region) DO NOTHING;
 
@@ -186,7 +209,19 @@ CREATE TABLE IF NOT EXISTS feedback (
     alert_id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL,
     user_id VARCHAR(64) NOT NULL,
+    metric VARCHAR(64),
+    source VARCHAR(64),
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS aiops_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    metric VARCHAR(64) NOT NULL,
+    mean DOUBLE PRECISION NOT NULL,
+    std DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS guard_reconciliation (
@@ -222,6 +257,10 @@ CREATE TABLE IF NOT EXISTS aiops_counters (
     updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
+
+CREATE INDEX IF NOT EXISTS idx_payloads_guard_seq ON payloads(guard_id, seq);
+CREATE INDEX IF NOT EXISTS idx_metrics_payload ON metrics(payload_id);
+CREATE INDEX IF NOT EXISTS idx_events_payload ON events(payload_id);
 
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
@@ -411,7 +450,19 @@ CREATE TABLE IF NOT EXISTS feedback (
     alert_id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL,
     user_id VARCHAR(64) NOT NULL,
+    metric VARCHAR(64),
+    source VARCHAR(64),
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS aiops_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    metric VARCHAR(64) NOT NULL,
+    mean DOUBLE PRECISION NOT NULL,
+    std DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS guard_reconciliation (
@@ -447,6 +498,10 @@ CREATE TABLE IF NOT EXISTS aiops_counters (
     updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
+
+CREATE INDEX IF NOT EXISTS idx_payloads_guard_seq ON payloads(guard_id, seq);
+CREATE INDEX IF NOT EXISTS idx_metrics_payload ON metrics(payload_id);
+CREATE INDEX IF NOT EXISTS idx_events_payload ON events(payload_id);
 
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;

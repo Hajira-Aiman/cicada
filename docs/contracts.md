@@ -242,17 +242,120 @@ All streaming messages follow the envelope `{ "event_type": "<type>", "tenant_id
 - `POST /api/regions/{region}/unpause`
 - `GET /api/regions/{region}/status`
 
-### 4.6 Thumbs-Down Feedback: `POST /feedback`
-- **Request:** `{"alert_id": "alt-101", "user_id": "user-ops-1"}`
-- **Response:** `200 OK` `{"status": "recorded", "alert_id": "alt-101"}`
+### 4.6 Action Intents & Guard Remediations
+- **Propose Intent:** `POST /api/actions/propose`
+  ```json
+  {
+    "action": "kill_process",
+    "target": "proc-7f3a1234",
+    "why": "Uncontrolled CPU loop detected by AIOps",
+    "risk": "medium",
+    "incident_id": "inc-acme-1001",
+    "tenant_id": "acme"
+  }
+  ```
+  *Response:* `{"status": "proposed", "intent_id": "act-4f9e12...", "intent": {...}}`
+- **Dry Run Simulation:** `POST /api/actions/{intent_id}/dry-run`
+  *Response:* `{"status": "dry_run_done", "simulation": {"would_affect": "proc-7f3a1234", "estimated_risk": "medium"}}`
+- **Human Approval:** `POST /api/actions/{intent_id}/approve`
+  ```json
+  {
+    "approved_by": "Adithya"
+  }
+  ```
+  *Response:* `{"status": "approved", "intent_id": "act-4f9e12...", "approved_by": "Adithya"}`
+- **Guard Poll Pending (HMAC-signed):** `GET /api/actions/pending?guard_id=guard-acme-01`
+  *Response:* `{"intents": [{"intent_id": "act-4f9e12...", "action": "kill_process", "target": "proc-7f3a1234", "signature": "..."}]}`
+- **Post Result & Automated Rollback:** `POST /api/actions/{intent_id}/result`
+  ```json
+  {
+    "guard_id": "guard-acme-01",
+    "status": "done",
+    "health_improved": true,
+    "elapsed_seconds": 25
+  }
+  ```
+  *(If `health_improved: false` or `elapsed_seconds > 120`, automated rollback status `rolled_back` is assigned)*.
+- **Audit Trail:** `GET /api/actions/audit`
 
-### 4.7 AI Assistant Chat: `POST /ai/chat`
-- **Request:** `{"question": "What caused the incident on host-7f3a1234?"}`
+### 4.7 Guest Judges Phone Join
+- **Phone Heartbeat:** `POST /api/phones/heartbeat`
+  ```json
+  {
+    "phone_id": "phone-judge-01",
+    "latency_ms": 42.5
+  }
+  ```
+  *Response:* `{"status": "ok", "phone_id": "phone-judge-01", "tenant_id": "guests", "color": "green", "latency_ms": 42.5}`
+  *(Color turns `"red"` if latency > 150 ms)*.
+- **List Active Phones:** `GET /api/phones`
+  *Response:* `{"phones": [{"phone_id": "phone-judge-01", "status": "online", "color": "green", "latency_ms": 42.5, "last_seen_s_ago": 1.2}]}`
+  *(Phones with no heartbeat for > 60 s transition to `status: "offline", color: "red"`)*.
+
+### 4.8 Metric Baselines Normal Band: `GET /api/baselines/{tenant_id}`
 - **Response:** `200 OK`
+  ```json
+  [
+    {
+      "source": "host-7f3a1234",
+      "metric": "cpu_pct",
+      "mean": 35.2,
+      "std": 4.8
+    }
+  ]
+  ```
+  *(Returns `[]` if no baseline rows are recorded yet for the tenant)*.
+
+### 4.9 Thumbs-Down Feedback: `POST /feedback`
+- **Request:**
+  ```json
+  {
+    "alert_id": "alt-acme-5001",
+    "user_id": "user-ops-1",
+    "tenant_id": "acme",
+    "metric": "cpu_pct",
+    "source": "host-7f3a1234"
+  }
+  ```
+  *(If `metric` or `source` is omitted, Head Office automatically resolves them from `aiops_alerts.body.signals`)*.
+- **Response:** `200 OK`
+  ```json
+  {
+    "status": "recorded",
+    "alert_id": "alt-acme-5001",
+    "tenant_id": "acme",
+    "user_id": "user-ops-1",
+    "metric": "cpu_pct",
+    "source": "host-7f3a1234",
+    "at": "2026-11-21T04:12:30Z"
+  }
+  ```
+
+### 4.10 AI Assistant Chat: `POST /ai/chat`
+- **Authentication:** Requires `Authorization: Bearer <session_token>` (`401` if missing or invalid).
+- **Tenant Context:**
+  - Customers (`role: "customer"`): tenant resolved automatically from authenticated session token.
+  - Engineers (`role: "engineer"`): requires explicit `tenant_id` in request body (`400` if omitted).
+- **Request:**
+  ```json
+  {
+    "question": "What caused the incident on host-7f3a1234?",
+    "tenant_id": "acme"
+  }
+  ```
+- Proxies with a **30-second timeout** to `http://localhost:8010/chat`.
+- **Response (Normal upstream):** `200 OK`
   ```json
   {
     "answer": "A rogue process spiked CPU to 95% after 50 failed SSH authentication attempts.",
     "evidence_ids": ["ev-1", "ev-2"]
+  }
+  ```
+- **Fallback Response (Upstream timeout or offline):** `200 OK`
+  ```json
+  {
+    "answer": "The AI service is not reachable right now.",
+    "evidence_ids": []
   }
   ```
 

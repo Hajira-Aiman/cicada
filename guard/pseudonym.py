@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -82,7 +83,30 @@ class PseudonymManager:
                     prefix TEXT NOT NULL,
                     raw_value TEXT NOT NULL,
                     created_at REAL NOT NULL
-                )
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS reveal_requests (
+                    id TEXT PRIMARY KEY,
+                    pseudonym TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    requested_at REAL NOT NULL,
+                    decision_reason TEXT,
+                    decided_at REAL
+                );
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS local_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL NOT NULL,
+                    action TEXT NOT NULL,
+                    details TEXT NOT NULL
+                );
                 """
             )
 
@@ -119,3 +143,68 @@ class PseudonymManager:
             cur = conn.cursor()
             cur.execute("SELECT * FROM reveal ORDER BY created_at ASC")
             return [dict(r) for r in cur.fetchall()]
+
+    def create_reveal_request(self, pseudonym: str, reason: str, req_id: Optional[str] = None) -> Dict[str, Any]:
+        """Creates a pending reveal request and writes to local audit log."""
+        r_id = req_id or f"req-{uuid.uuid4().hex[:8]}"
+        now = time.time()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO reveal_requests (id, pseudonym, reason, status, requested_at)
+                VALUES (?, ?, ?, 'pending', ?)
+                """,
+                (r_id, pseudonym, reason, now),
+            )
+            conn.execute(
+                "INSERT INTO local_audit (timestamp, action, details) VALUES (?, ?, ?)",
+                (now, "reveal_requested", f"Requested reveal for {pseudonym}: {reason}"),
+            )
+        return {
+            "id": r_id,
+            "pseudonym": pseudonym,
+            "reason": reason,
+            "status": "pending",
+            "requested_at": now,
+        }
+
+    def list_reveal_requests(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Lists reveal requests, optionally filtered by status ('pending', 'approved', 'rejected')."""
+        with self.connection() as conn:
+            cur = conn.cursor()
+            if status:
+                cur.execute("SELECT * FROM reveal_requests WHERE status = ? ORDER BY requested_at DESC", (status,))
+            else:
+                cur.execute("SELECT * FROM reveal_requests ORDER BY requested_at DESC")
+            return [dict(r) for r in cur.fetchall()]
+
+    def decide_reveal_request(self, req_id: str, approved: bool, reason: str = "") -> Optional[Dict[str, Any]]:
+        """Decides a reveal request locally, records audit log, and returns resolved details."""
+        now = time.time()
+        new_status = "approved" if approved else "rejected"
+        action = "reveal_approved" if approved else "reveal_rejected"
+        with self.connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM reveal_requests WHERE id = ?", (req_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            req = dict(row)
+            cur.execute(
+                """
+                UPDATE reveal_requests
+                SET status = ?, decision_reason = ?, decided_at = ?
+                WHERE id = ?
+                """,
+                (new_status, reason, now, req_id),
+            )
+            cur.execute(
+                "INSERT INTO local_audit (timestamp, action, details) VALUES (?, ?, ?)",
+                (now, action, f"{action} for {req['pseudonym']}: {reason}"),
+            )
+            req["status"] = new_status
+            req["decision_reason"] = reason
+            req["decided_at"] = now
+            if approved:
+                req["revealed_value"] = self.reveal(req["pseudonym"])
+            return req

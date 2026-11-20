@@ -55,11 +55,12 @@ def test_guard_to_headoffice_ingest_in():
         # Verify metrics table rows
         cur.execute("SELECT name, source, avg, max FROM metrics WHERE payload_id = ?", (payload.payload_id,))
         metric_rows = cur.fetchall()
-        assert len(metric_rows) >= 3  # cpu_pct, service_up, latency_ms
+        assert len(metric_rows) >= 4  # cpu_pct, service_up, latency_ms, packet_loss_pct
         names = [r[0] for r in metric_rows]
         assert "cpu_pct" in names
         assert "service_up" in names
         assert "latency_ms" in names
+        assert "packet_loss_pct" in names
 
 
 def test_guard_to_headoffice_ingest_eu():
@@ -94,3 +95,52 @@ def test_guard_to_headoffice_ingest_eu():
         cur.execute("SELECT name, avg FROM metrics WHERE payload_id = ?", (payload.payload_id,))
         metrics = cur.fetchall()
         assert len(metrics) >= 3
+
+
+def test_honeypot_and_power_cut_reach_headoffice_within_one_cycle():
+    """
+    T19: Honeypot hit (login with admin_backup) and power cut (charger unplug)
+    must reach head office within one payload cycle.
+    """
+    app_in = create_ingest_app(region="in")
+    with TestClient(app_in, base_url="http://localhost:8001") as client:
+        cfg = GuardConfig()
+        cfg.TENANT_ID = "acme"
+        cfg.GUARD_ID = "guard-acme-01"
+        cfg.GUARD_SECRET_KEY = "sec-acme-super-secret-key-2026"
+        cfg.REGION_URL = "/ingest"
+
+        guard = GuardThinSlice(cfg=cfg)
+
+        # 1. Trigger honeypot attempt with trap user admin_backup
+        guard.record_login(
+            raw_username="admin_backup",
+            raw_ip="203.0.113.19",
+            success=False,
+        )
+
+        # 2. Trigger power cut (charger unplugged)
+        guard.power_detector.set_override(percent=88.0, power_plugged=False, secsleft=3600)
+
+        # 3. Collect window in exactly 1 cycle
+        with TestClient(healthy_shop) as probe_client:
+            payload, body_bytes = guard.collect_window(duration_seconds=2.0, probe_client=probe_client)
+
+        # Send to Head Office Ingest
+        receipt = guard.send_payload(payload, body_bytes, client=client)
+        assert receipt.status == "stored"
+
+        # Verify Head Office DB received both honeypot_hit and power_on_battery in 1 cycle
+        conn = get_sqlite_conn("airlock_in")
+        cur = conn.cursor()
+        cur.execute("SELECT category, severity FROM events WHERE payload_id = ?", (payload.payload_id,))
+        ev_rows = cur.fetchall()
+        categories = [r[0] for r in ev_rows]
+        assert "honeypot_hit" in categories
+        assert "power_on_battery" in categories
+
+        # Verify battery metrics are present in Head Office DB
+        cur.execute("SELECT name, avg FROM metrics WHERE payload_id = ?", (payload.payload_id,))
+        m_rows = {r[0]: r[1] for r in cur.fetchall()}
+        assert m_rows["on_battery"] == 1.0
+        assert m_rows["battery_pct"] == 88.0

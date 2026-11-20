@@ -157,6 +157,16 @@ class GuardLedger:
             cur.execute("SELECT * FROM ledger ORDER BY seq ASC")
             return [dict(r) for r in cur.fetchall()]
 
+    def get_recent_rows(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Returns the last N payloads recorded in the ledger, ordered by seq DESC."""
+        with self.connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT seq, payload_id, sha256, prev_hash, body, status, receipt_at FROM ledger ORDER BY seq DESC LIMIT ?",
+                (limit,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
     def verify_chain(self) -> Tuple[bool, Optional[str]]:
         """
         Verifies the full cryptographic hash chain of the ledger:

@@ -38,6 +38,93 @@ _active_scenarios: Dict[str, Dict[str, Any]] = {}
 _lock = threading.Lock()
 
 
+# --- Real Chaos Effect Implementations ---
+
+def _run_cpu_burner(duration_s: float):
+    """Real CPU-burning busy loop pinning 1 core to 100% for duration_s."""
+    end_time = time.time() + duration_s
+    while time.time() < end_time:
+        _ = 3.1415926535 * 2.7182818284 * 1.4142135623
+
+
+def _run_brute_force(duration_s: float, target_url: str):
+    """Sends rapid burst of invalid authentication attempts."""
+    import httpx
+    end_time = time.time() + duration_s
+    with httpx.Client(timeout=2.0) as client:
+        while time.time() < end_time:
+            try:
+                client.post(
+                    target_url,
+                    json={"username": f"attacker_{uuid.uuid4().hex[:6]}", "password": "wrong_password_123"},
+                )
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+
+def _run_backup_job(duration_s: float):
+    """Periodic noisy backup job: 12 s CPU burst followed by 48 s idle."""
+    end_time = time.time() + duration_s
+    while time.time() < end_time:
+        burst_end = min(time.time() + 12.0, end_time)
+        while time.time() < burst_end:
+            _ = 999999.0 ** 0.5
+        idle_until = min(time.time() + 48.0, end_time)
+        remaining = idle_until - time.time()
+        if remaining > 0:
+            time.sleep(remaining)
+
+
+def _run_kill_chain(duration_s: float):
+    """Multi-stage kill chain progression: Recon -> Brute Force -> Resource Exhaustion -> Outbound socket."""
+    import httpx
+    step_duration = max(duration_s / 4.0, 1.0)
+    # Stage 1: Recon scan
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            client.get("http://localhost:8000/api/health")
+    except Exception:
+        pass
+    time.sleep(step_duration)
+
+    # Stage 2: Login burst
+    _run_brute_force(step_duration, "http://localhost:8000/api/login")
+
+    # Stage 3: High CPU spike
+    _run_cpu_burner(step_duration)
+
+
+def _run_region_outage(region: str, duration_s: float):
+    """Real region outage: sets region_states.is_paused = True in airlock_core."""
+    try:
+        from hq.db import set_region_paused
+        set_region_paused(region, True)
+        time.sleep(duration_s)
+        set_region_paused(region, False)
+    except Exception:
+        pass
+
+
+def _run_latency_netem(duration_s: float, delay_ms: int = 450, loss_pct: int = 3, iface: str = "lo"):
+    """Applies kernel traffic control delay and packet loss via tc netem on interface."""
+    import subprocess
+    cmd_add = f"sudo /usr/sbin/tc qdisc add dev {iface} root netem delay {delay_ms}ms loss {loss_pct}%"
+    cmd_del = f"sudo /usr/sbin/tc qdisc del dev {iface} root"
+    try:
+        subprocess.run(cmd_add, shell=True, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(duration_s)
+    finally:
+        subprocess.run(cmd_del, shell=True, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _run_restart_app(target: Optional[str] = None):
+    """Restarts application service via systemctl or docker."""
+    import subprocess
+    app_name = target or "shop-api"
+    subprocess.run(f"systemctl restart {app_name} 2>/dev/null || docker restart {app_name} 2>/dev/null || true", shell=True)
+
+
 class ScenarioRequest(BaseModel):
     duration_s: int = 15
     target: Optional[str] = None
@@ -66,7 +153,30 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
             "params": params or {},
         }
         _active_scenarios[name] = entry
-        return entry
+
+    # Trigger real effect in background worker thread
+    p = params or {}
+    if name == "cpu_spike":
+        threading.Thread(target=_run_cpu_burner, args=(duration_s,), daemon=True).start()
+    elif name in ("brute_force", "login_burst"):
+        target_url = p.get("url", "http://localhost:8000/api/login")
+        threading.Thread(target=_run_brute_force, args=(duration_s, target_url), daemon=True).start()
+    elif name == "backup_job":
+        threading.Thread(target=_run_backup_job, args=(duration_s,), daemon=True).start()
+    elif name == "kill_chain":
+        threading.Thread(target=_run_kill_chain, args=(duration_s,), daemon=True).start()
+    elif name in ("region_outage", "outage"):
+        reg = target or p.get("region", "in")
+        threading.Thread(target=_run_region_outage, args=(reg, duration_s), daemon=True).start()
+    elif name == "latency":
+        delay = int(p.get("delay_ms", 450))
+        loss = int(p.get("loss_pct", 3))
+        iface = str(p.get("interface", "lo"))
+        threading.Thread(target=_run_latency_netem, args=(duration_s, delay, loss, iface), daemon=True).start()
+    elif name == "restart_app":
+        threading.Thread(target=_run_restart_app, args=(target,), daemon=True).start()
+
+    return entry
 
 
 def _prune_expired():

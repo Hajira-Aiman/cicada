@@ -9,6 +9,7 @@ Never exposes raw logs outside the customer environment.
 """
 
 import json
+import time
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
@@ -72,82 +73,89 @@ class ShopAIAssistant:
 
     def search_raw_logs(self, query: str, minutes: int = 10) -> List[Dict[str, Any]]:
         """Queries local SQLite raw.db for log lines matching query."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        cutoff_iso = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        cutoff_epoch = time.time() - (minutes * 60)
         try:
             with sqlite3.connect(self.raw_db_path) as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS raw_logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,
-                        level TEXT NOT NULL,
-                        source_ip TEXT,
-                        username TEXT,
-                        message TEXT NOT NULL
+                cursor.execute("PRAGMA table_info(raw_logs)")
+                cols = {row["name"] for row in cursor.fetchall()}
+                if "raw_text" in cols:
+                    cursor.execute(
+                        "SELECT * FROM raw_logs WHERE timestamp >= ? AND raw_text LIKE ? ORDER BY id DESC LIMIT 50",
+                        (cutoff_epoch, f"%{query}%"),
                     )
-                    """
-                )
-                cursor.execute(
-                    """
-                    SELECT timestamp, level, source_ip, username, message
-                    FROM raw_logs
-                    WHERE timestamp >= ? AND message LIKE ?
-                    ORDER BY id DESC LIMIT 50
-                    """,
-                    (cutoff, f"%{query}%"),
-                )
-                rows = cursor.fetchall()
-                return [
-                    {
-                        "timestamp": r[0],
-                        "level": r[1],
-                        "source_ip": r[2],
-                        "username": r[3],
-                        "message": r[4],
-                    }
-                    for r in rows
-                ]
+                    return [dict(r) for r in cursor.fetchall()]
+                else:
+                    cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS raw_logs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            timestamp TEXT NOT NULL,
+                            level TEXT NOT NULL,
+                            source_ip TEXT,
+                            username TEXT,
+                            message TEXT NOT NULL
+                        )
+                        """
+                    )
+                    cursor.execute(
+                        """
+                        SELECT timestamp, level, source_ip, username, message
+                        FROM raw_logs
+                        WHERE timestamp >= ? AND message LIKE ?
+                        ORDER BY id DESC LIMIT 50
+                        """,
+                        (cutoff_iso, f"%{query}%"),
+                    )
+                    return [dict(r) for r in cursor.fetchall()]
         except Exception as e:
             return [{"error": f"Failed to query local raw store: {e}"}]
 
     def recent_auth_failures(self, minutes: int = 10) -> List[Dict[str, Any]]:
         """Queries local raw.db for failed login events."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        cutoff_iso = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        cutoff_epoch = time.time() - (minutes * 60)
         try:
             with sqlite3.connect(self.raw_db_path) as conn:
+                conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS raw_logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,
-                        level TEXT NOT NULL,
-                        source_ip TEXT,
-                        username TEXT,
-                        message TEXT NOT NULL
+                cursor.execute("PRAGMA table_info(raw_logs)")
+                cols = {row["name"] for row in cursor.fetchall()}
+                if "raw_text" in cols:
+                    cursor.execute(
+                        """
+                        SELECT * FROM raw_logs 
+                        WHERE timestamp >= ? AND (raw_text LIKE '%login_failure%' OR raw_text LIKE '%Failed password%' OR raw_text LIKE '%invalid password%')
+                        ORDER BY id DESC LIMIT 50
+                        """,
+                        (cutoff_epoch,),
                     )
-                    """
-                )
-                cursor.execute(
-                    """
-                    SELECT timestamp, source_ip, username, message
-                    FROM raw_logs
-                    WHERE timestamp >= ? AND (message LIKE '%login failed%' OR message LIKE '%invalid password%' OR level = 'WARNING')
-                    ORDER BY id DESC LIMIT 50
-                    """,
-                    (cutoff,),
-                )
-                rows = cursor.fetchall()
-                return [
-                    {
-                        "timestamp": r[0],
-                        "source_ip": r[1],
-                        "username": r[2],
-                        "message": r[3],
-                    }
-                    for r in rows
-                ]
+                    return [dict(r) for r in cursor.fetchall()]
+                else:
+                    cursor.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS raw_logs (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            timestamp TEXT NOT NULL,
+                            level TEXT NOT NULL,
+                            source_ip TEXT,
+                            username TEXT,
+                            message TEXT NOT NULL
+                        )
+                        """
+                    )
+                    cursor.execute(
+                        """
+                        SELECT timestamp, source_ip, username, message
+                        FROM raw_logs
+                        WHERE timestamp >= ? AND (message LIKE '%login failed%' OR message LIKE '%invalid password%' OR level = 'WARNING')
+                        ORDER BY id DESC LIMIT 50
+                        """,
+                        (cutoff_iso,),
+                    )
+                    return [dict(r) for r in cursor.fetchall()]
         except Exception as e:
             return [{"error": f"Failed to query auth failures: {e}"}]
 

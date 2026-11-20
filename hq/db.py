@@ -19,9 +19,11 @@ from typing import Any, Dict, List, Optional, Tuple
 try:
     import psycopg
     from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
     PSYCOPG_AVAILABLE = True
 except ImportError:
     PSYCOPG_AVAILABLE = False
+    ConnectionPool = None
 
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = int(os.getenv("DB_PORT", "5432"))
@@ -32,11 +34,20 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
 _sqlite_dbs: Dict[str, sqlite3.Connection] = {}
 _force_sqlite = os.getenv("AIRLOCK_USE_SQLITE", "false").lower() == "true"
 
+# Global connection pools (min 2, max 10 connections per database)
+_pools: Dict[str, Any] = {}
+_postgres_available: Optional[bool] = None
+
 
 def is_postgres_available() -> bool:
     """Checks if PostgreSQL is reachable."""
+    global _postgres_available
     if _force_sqlite or not PSYCOPG_AVAILABLE:
         return False
+    if _pools:
+        return True
+    if _postgres_available is not None:
+        return _postgres_available
     try:
         with psycopg.connect(
             host=DB_HOST,
@@ -44,11 +55,41 @@ def is_postgres_available() -> bool:
             user=DB_USER,
             password=DB_PASSWORD,
             dbname="postgres",
-            connect_timeout=1,
+            connect_timeout=2,
         ) as conn:
+            _postgres_available = True
             return True
     except Exception:
+        _postgres_available = False
         return False
+
+
+def get_db_pool(db_name: str) -> Optional[Any]:
+    """Returns or creates a ConnectionPool for the specified database."""
+    if not is_postgres_available():
+        return None
+    if db_name not in _pools:
+        conninfo = f"host={DB_HOST} port={DB_PORT} user={DB_USER} password={DB_PASSWORD} dbname={db_name}"
+        _pools[db_name] = ConnectionPool(
+            conninfo=conninfo,
+            min_size=2,
+            max_size=10,
+            open=True,
+            kwargs={"row_factory": dict_row},
+        )
+    return _pools[db_name]
+
+
+def close_all_pools():
+    """Closes all connection pools and resets availability cache."""
+    global _pools, _postgres_available
+    for pool in list(_pools.values()):
+        try:
+            pool.close()
+        except Exception:
+            pass
+    _pools.clear()
+    _postgres_available = None
 
 
 def get_sqlite_conn(db_name: str) -> sqlite3.Connection:
@@ -113,6 +154,27 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 status TEXT DEFAULT 'pending',
                 decided_at TEXT,
                 decision_reason TEXT
+            );
+            CREATE TABLE IF NOT EXISTS action_intents (
+                intent_id TEXT PRIMARY KEY,
+                incident_id TEXT,
+                tenant_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL,
+                risk TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                details TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                approved_by TEXT,
+                expires_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS action_audit (
+                event_id TEXT PRIMARY KEY,
+                intent_id TEXT,
+                actor TEXT NOT NULL,
+                step TEXT NOT NULL,
+                details TEXT,
+                at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             INSERT OR IGNORE INTO region_states (region, is_paused) VALUES ('in', 0), ('eu', 0);
             INSERT OR IGNORE INTO tenants (tenant_id, name, assigned_region, pinned_policy_hash) VALUES
@@ -208,7 +270,18 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 alert_id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
+                metric TEXT,
+                source TEXT,
                 at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS aiops_baselines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                mean REAL NOT NULL,
+                std REAL NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS guard_reconciliation (
                 guard_id TEXT PRIMARY KEY,
@@ -257,19 +330,18 @@ def init_all_databases():
 def register_guard(guard_id: str, tenant_id: str, hmac_secret: str, db_name: str = "airlock_core"):
     """Registers or updates a guard credential in airlock_core."""
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO guards (guard_id, tenant_id, hmac_secret)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (guard_id) DO UPDATE SET hmac_secret = EXCLUDED.hmac_secret;
-                    """,
-                    (guard_id, tenant_id, hmac_secret),
-                )
-            conn.commit()
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO guards (guard_id, tenant_id, hmac_secret)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (guard_id) DO UPDATE SET hmac_secret = EXCLUDED.hmac_secret;
+                        """,
+                        (guard_id, tenant_id, hmac_secret),
+                    )
     else:
         conn = get_sqlite_conn(db_name)
         cur = conn.cursor()
@@ -287,9 +359,8 @@ def lookup_guard(guard_id: str, db_name: str = "airlock_core") -> Optional[Dict[
     """Looks up guard details by guard_id."""
     if is_postgres_available():
         try:
-            with psycopg.connect(
-                host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name, row_factory=dict_row
-            ) as conn:
+            pool = get_db_pool(db_name)
+            with pool.connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT guard_id, tenant_id, hmac_secret, status FROM guards WHERE guard_id = %s;", (guard_id,))
                     row = cur.fetchone()
@@ -369,7 +440,7 @@ def _store_sqlite(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str, 
 
 def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) -> str:
     """
-    Stores an incoming payload idempotently.
+    Stores an incoming payload idempotently in ONE transaction with SET LOCAL app.current_tenant.
     Returns: 'stored' if newly inserted, 'duplicate' if already present.
     """
     payload_id = payload_dict["payload_id"]
@@ -384,68 +455,78 @@ def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) 
 
     res = "stored"
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
-        ) as conn:
-            with conn.cursor() as cur:
-                # Check for duplicate
-                cur.execute("SELECT payload_id FROM payloads WHERE payload_id = %s;", (payload_id,))
-                if cur.fetchone():
-                    # Record duplicate receipt
-                    cur.execute(
-                        """
-                        INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
-                        VALUES (%s, %s, %s, %s, 'duplicate')
-                        ON CONFLICT (payload_id) DO NOTHING;
-                        """,
-                        (payload_id, guard_id, sha256_hash, now_iso),
-                    )
-                    conn.commit()
-                    res = "duplicate"
-                else:
-                    # Insert payload
-                    cur.execute(
-                        """
-                        INSERT INTO payloads (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, raw_payload, received_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-                        """,
-                        (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, json.dumps(payload_dict), now_iso),
-                    )
-
-                    # Insert metrics
-                    for m in payload_dict.get("metrics", []):
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("SELECT set_config('app.current_tenant', %s, true);", (tenant_id,))
+                    # Check for duplicate
+                    cur.execute("SELECT payload_id FROM payloads WHERE payload_id = %s;", (payload_id,))
+                    if cur.fetchone():
+                        # Record duplicate receipt
                         cur.execute(
                             """
-                            INSERT INTO metrics (payload_id, tenant_id, source, name, avg, max, event_time)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s);
+                            INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
+                            VALUES (%s, %s, %s, %s, 'duplicate')
+                            ON CONFLICT (payload_id) DO NOTHING;
                             """,
-                            (payload_id, tenant_id, m["source"], m["name"], m["avg"], m["max"], window_start),
+                            (payload_id, guard_id, sha256_hash, now_iso),
                         )
-
-                    # Insert events
-                    for e in payload_dict.get("events", []):
+                        res = "duplicate"
+                    else:
+                        # Insert payload
                         cur.execute(
                             """
-                            INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                            INSERT INTO payloads (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, raw_payload, received_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                             """,
-                            (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), window_start),
+                            (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, json.dumps(payload_dict), now_iso),
                         )
 
-                    # Record stored receipt
-                    cur.execute(
-                        """
-                        INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
-                        VALUES (%s, %s, %s, %s, 'stored');
-                        """,
-                        (payload_id, guard_id, sha256_hash, now_iso),
-                    )
-                    conn.commit()
-                    res = "stored"
+                        # Insert metrics in batch
+                        metrics = payload_dict.get("metrics", [])
+                        if metrics:
+                            cur.executemany(
+                                """
+                                INSERT INTO metrics (payload_id, tenant_id, source, name, avg, max, event_time)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s);
+                                """,
+                                [
+                                    (payload_id, tenant_id, m["source"], m["name"], m["avg"], m["max"], window_start)
+                                    for m in metrics
+                                ],
+                            )
+
+                        # Insert events in batch
+                        events = payload_dict.get("events", [])
+                        if events:
+                            cur.executemany(
+                                """
+                                INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                                """,
+                                [
+                                    (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), window_start)
+                                    for e in events
+                                ],
+                            )
+
+                        # Record stored receipt
+                        cur.execute(
+                            """
+                            INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
+                            VALUES (%s, %s, %s, %s, 'stored');
+                            """,
+                            (payload_id, guard_id, sha256_hash, now_iso),
+                        )
+                        res = "stored"
 
     if is_postgres_available():
         # Mirror to in-memory SQLite for test harnesses inspecting get_sqlite_conn
-        _store_sqlite(db_name, payload_dict, sha256_hash, now_iso)
+        try:
+            _store_sqlite(db_name, payload_dict, sha256_hash, now_iso)
+        except Exception:
+            pass
         return res
     return _store_sqlite(db_name, payload_dict, sha256_hash, now_iso)
 
@@ -533,17 +614,16 @@ def execute_query(
 ) -> List[Dict[str, Any]]:
     """Executes a query with optional tenant RLS isolation and returns rows as dictionaries."""
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name, row_factory=dict_row
-        ) as conn:
-            with conn.cursor() as cur:
-                if tenant_id and db_name in ("airlock_in", "airlock_eu"):
-                    cur.execute("SELECT set_config('app.current_tenant', %s, true);", (tenant_id,))
-                cur.execute(query, params)
-                if cur.description:
-                    return [dict(r) for r in cur.fetchall()]
-                conn.commit()
-                return []
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    if tenant_id and db_name in ("airlock_in", "airlock_eu"):
+                        cur.execute("SELECT set_config('app.current_tenant', %s, true);", (tenant_id,))
+                    cur.execute(query, params)
+                    if cur.description:
+                        return [dict(r) for r in cur.fetchall()]
+                    return []
     else:
         conn = get_sqlite_conn(db_name)
         cur = conn.cursor()
@@ -576,18 +656,17 @@ def log_audit_event(
 
     if is_postgres_available():
         try:
-            with psycopg.connect(
-                host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
-            ) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO audit_log (event_id, tenant_id, actor, action, details, timestamp)
-                        VALUES (%s, %s, %s, %s, %s, %s);
-                        """,
-                        (event_id, tenant_id, actor, action, details_json, now_iso),
-                    )
-                conn.commit()
+            pool = get_db_pool("airlock_core")
+            with pool.connection() as conn:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO audit_log (event_id, tenant_id, actor, action, details, timestamp)
+                            VALUES (%s, %s, %s, %s, %s, %s);
+                            """,
+                            (event_id, tenant_id, actor, action, details_json, now_iso),
+                        )
         except Exception:
             pass
 
@@ -609,9 +688,8 @@ def get_audit_logs(
 ) -> List[Dict[str, Any]]:
     """Returns recent audit logs matching tenant or action filter."""
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core", row_factory=dict_row
-        ) as conn:
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
             with conn.cursor() as cur:
                 q = "SELECT event_id, tenant_id, actor, action, details, timestamp FROM audit_log WHERE 1=1"
                 params = []
@@ -667,19 +745,18 @@ def set_region_paused(region: str, paused: bool) -> None:
     """Pauses or resumes ingestion for a region."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO region_states (region, is_paused, paused_at)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (region) DO UPDATE SET is_paused = EXCLUDED.is_paused, paused_at = EXCLUDED.paused_at;
-                    """,
-                    (region, paused, now_iso),
-                )
-            conn.commit()
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO region_states (region, is_paused, paused_at)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (region) DO UPDATE SET is_paused = EXCLUDED.is_paused, paused_at = EXCLUDED.paused_at;
+                        """,
+                        (region, paused, now_iso),
+                    )
     conn_sq = get_sqlite_conn("airlock_core")
     cur_sq = conn_sq.cursor()
     cur_sq.execute(
@@ -695,9 +772,8 @@ def set_region_paused(region: str, paused: bool) -> None:
 def get_tenant_pinned_policy(tenant_id: str) -> Optional[str]:
     """Retrieves pinned policy hash for a tenant."""
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core", row_factory=dict_row
-        ) as conn:
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT pinned_policy_hash FROM tenants WHERE tenant_id = %s;", (tenant_id,))
                 row = cur.fetchone()
@@ -713,15 +789,14 @@ def get_tenant_pinned_policy(tenant_id: str) -> Optional[str]:
 def set_tenant_pinned_policy(tenant_id: str, policy_hash: str):
     """Sets or updates the pinned policy hash for a tenant."""
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE tenants SET pinned_policy_hash = %s WHERE tenant_id = %s;",
-                    (policy_hash, tenant_id),
-                )
-            conn.commit()
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE tenants SET pinned_policy_hash = %s WHERE tenant_id = %s;",
+                        (policy_hash, tenant_id),
+                    )
     conn_sq = get_sqlite_conn("airlock_core")
     cur_sq = conn_sq.cursor()
     cur_sq.execute(
@@ -736,23 +811,22 @@ def record_leak_detected(tenant_id: str) -> int:
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_count = 1
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO leak_counters (tenant_id, leak_count, updated_at)
-                    VALUES (%s, 1, %s)
-                    ON CONFLICT (tenant_id) DO UPDATE SET leak_count = leak_counters.leak_count + 1, updated_at = %s
-                    RETURNING leak_count;
-                    """,
-                    (tenant_id, now_iso, now_iso),
-                )
-                row = cur.fetchone()
-                if row:
-                    new_count = row[0]
-            conn.commit()
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO leak_counters (tenant_id, leak_count, updated_at)
+                        VALUES (%s, 1, %s)
+                        ON CONFLICT (tenant_id) DO UPDATE SET leak_count = leak_counters.leak_count + 1, updated_at = %s
+                        RETURNING leak_count;
+                        """,
+                        (tenant_id, now_iso, now_iso),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        new_count = row["leak_count"] if isinstance(row, dict) else row[0]
 
     conn_sq = get_sqlite_conn("airlock_core")
     cur_sq = conn_sq.cursor()
@@ -771,17 +845,17 @@ def record_leak_detected(tenant_id: str) -> int:
 def get_leak_badge_count(tenant_id: Optional[str] = None) -> int:
     """Returns the total leaks detected (for a tenant or across all tenants)."""
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
-        ) as conn:
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
             with conn.cursor() as cur:
                 if tenant_id:
                     cur.execute("SELECT leak_count FROM leak_counters WHERE tenant_id = %s;", (tenant_id,))
                     row = cur.fetchone()
-                    return row[0] if row else 0
-                cur.execute("SELECT COALESCE(SUM(leak_count), 0) FROM leak_counters;")
+                    return (row["leak_count"] if isinstance(row, dict) else row[0]) if row else 0
+                cur.execute("SELECT COALESCE(SUM(leak_count), 0) AS total FROM leak_counters;")
                 row = cur.fetchone()
-                return int(row[0]) if row else 0
+                val = row["total"] if isinstance(row, dict) else row[0]
+                return int(val) if row else 0
     else:
         conn = get_sqlite_conn("airlock_core")
         cur = conn.cursor()
@@ -843,38 +917,37 @@ def update_guard_reconciliation(
     received_count = len(stored_seqs)
 
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO guard_reconciliation (
-                        guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (guard_id) DO UPDATE SET
-                        sent_count = EXCLUDED.sent_count,
-                        received_count = EXCLUDED.received_count,
-                        duplicate_count = guard_reconciliation.duplicate_count + %s,
-                        max_seq = EXCLUDED.max_seq,
-                        last_hash = EXCLUDED.last_hash,
-                        gaps = EXCLUDED.gaps,
-                        last_seen = EXCLUDED.last_seen;
-                    """,
-                    (
-                        guard_id,
-                        tenant_id,
-                        max_seq,
-                        received_count,
-                        1 if is_duplicate else 0,
-                        max_seq,
-                        payload_hash,
-                        gaps_json,
-                        now_iso,
-                        1 if is_duplicate else 0,
-                    ),
-                )
-            conn.commit()
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO guard_reconciliation (
+                            guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (guard_id) DO UPDATE SET
+                            sent_count = EXCLUDED.sent_count,
+                            received_count = EXCLUDED.received_count,
+                            duplicate_count = guard_reconciliation.duplicate_count + %s,
+                            max_seq = EXCLUDED.max_seq,
+                            last_hash = EXCLUDED.last_hash,
+                            gaps = EXCLUDED.gaps,
+                            last_seen = EXCLUDED.last_seen;
+                        """,
+                        (
+                            guard_id,
+                            tenant_id,
+                            max_seq,
+                            received_count,
+                            1 if is_duplicate else 0,
+                            max_seq,
+                            payload_hash,
+                            gaps_json,
+                            now_iso,
+                            1 if is_duplicate else 0,
+                        ),
+                    )
 
     conn_sq = get_sqlite_conn(db_name)
     cur_sq = conn_sq.cursor()
@@ -1031,19 +1104,18 @@ def create_reveal_request(
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO reveal_requests (request_id, tenant_id, pseudonym, requested_by, reason, requested_at, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, 'pending')
-                    ON CONFLICT (request_id) DO NOTHING;
-                    """,
-                    (req_id, tenant_id, pseudonym, requested_by, reason, now_iso),
-                )
-            conn.commit()
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO reveal_requests (request_id, tenant_id, pseudonym, requested_by, reason, requested_at, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+                        ON CONFLICT (request_id) DO NOTHING;
+                        """,
+                        (req_id, tenant_id, pseudonym, requested_by, reason, now_iso),
+                    )
     conn_sq = get_sqlite_conn("airlock_core")
     cur_sq = conn_sq.cursor()
     cur_sq.execute(
@@ -1097,19 +1169,18 @@ def update_reveal_request_status(
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE reveal_requests 
-                    SET status = %s, decided_at = %s, decision_reason = %s
-                    WHERE request_id = %s;
-                    """,
-                    (status, now_iso, decision_reason, request_id),
-                )
-            conn.commit()
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE reveal_requests 
+                        SET status = %s, decided_at = %s, decision_reason = %s
+                        WHERE request_id = %s;
+                        """,
+                        (status, now_iso, decision_reason, request_id),
+                    )
     conn_sq = get_sqlite_conn("airlock_core")
     cur_sq = conn_sq.cursor()
     cur_sq.execute(
@@ -1136,35 +1207,68 @@ def update_reveal_request_status(
     return rows[0] if rows else None
 
 
-def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, Any]:
+def record_feedback(
+    alert_id: str,
+    tenant_id: str,
+    user_id: str,
+    metric: Optional[str] = None,
+    source: Optional[str] = None,
+) -> Dict[str, Any]:
     """Records user thumbs-down feedback for an alert/incident into the regional database."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
     db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
 
+    if metric is None or source is None:
+        try:
+            alert_query = (
+                "SELECT body, source FROM aiops_alerts WHERE alert_id = %s;"
+                if is_postgres_available()
+                else "SELECT body, source FROM aiops_alerts WHERE alert_id = ?;"
+            )
+            alert_rows = execute_query(db_name, alert_query, (alert_id,), tenant_id=tenant_id)
+            if alert_rows:
+                r = alert_rows[0]
+                if not source and r.get("source"):
+                    source = r["source"]
+                body_val = r.get("body")
+                if isinstance(body_val, str):
+                    try:
+                        body_val = json.loads(body_val)
+                    except Exception:
+                        body_val = {}
+                if isinstance(body_val, dict):
+                    signals = body_val.get("signals") or []
+                    if signals and isinstance(signals[0], dict):
+                        if not metric:
+                            metric = signals[0].get("name")
+                        if not source:
+                            source = signals[0].get("source")
+        except Exception:
+            pass
+
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO feedback (alert_id, tenant_id, user_id, at)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (alert_id) DO UPDATE SET user_id = EXCLUDED.user_id, at = EXCLUDED.at;
-                    """,
-                    (alert_id, tenant_id, user_id, now_iso),
-                )
-            conn.commit()
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO feedback (alert_id, tenant_id, user_id, metric, source, at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (alert_id) DO UPDATE SET user_id = EXCLUDED.user_id, metric = EXCLUDED.metric, source = EXCLUDED.source, at = EXCLUDED.at;
+                        """,
+                        (alert_id, tenant_id, user_id, metric, source, now_iso),
+                    )
 
     conn_sq = get_sqlite_conn(db_name)
     cur_sq = conn_sq.cursor()
     cur_sq.execute(
         """
-        INSERT OR REPLACE INTO feedback (alert_id, tenant_id, user_id, at)
-        VALUES (?, ?, ?, ?);
+        INSERT OR REPLACE INTO feedback (alert_id, tenant_id, user_id, metric, source, at)
+        VALUES (?, ?, ?, ?, ?, ?);
         """,
-        (alert_id, tenant_id, user_id, now_iso),
+        (alert_id, tenant_id, user_id, metric, source, now_iso),
     )
     conn_sq.commit()
 
@@ -1172,7 +1276,7 @@ def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, An
         actor=user_id,
         action="feedback_submitted",
         tenant_id=tenant_id,
-        details={"alert_id": alert_id, "user_id": user_id, "at": now_iso},
+        details={"alert_id": alert_id, "user_id": user_id, "metric": metric, "source": source, "at": now_iso},
     )
 
     return {
@@ -1180,8 +1284,34 @@ def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, An
         "alert_id": alert_id,
         "tenant_id": tenant_id,
         "user_id": user_id,
+        "metric": metric,
+        "source": source,
         "at": now_iso,
     }
+
+
+def get_tenant_baselines(tenant_id: str) -> List[Dict[str, Any]]:
+    """Reads baseline normal bands from aiops_baselines table in regional DB."""
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+    query = (
+        "SELECT source, metric, mean, std FROM aiops_baselines WHERE tenant_id = %s;"
+        if is_postgres_available()
+        else "SELECT source, metric, mean, std FROM aiops_baselines WHERE tenant_id = ?;"
+    )
+    try:
+        rows = execute_query(db_name, query, (tenant_id,), tenant_id=tenant_id)
+        return [
+            {
+                "source": r["source"],
+                "metric": r["metric"],
+                "mean": float(r["mean"]),
+                "std": float(r["std"]),
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
 
 
 def get_tenant_counters(tenant_id: str) -> Dict[str, Any]:
@@ -1228,24 +1358,23 @@ def update_tenant_counters(
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if is_postgres_available():
-        with psycopg.connect(
-            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
-        ) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO aiops_counters (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, updated)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (tenant_id) DO UPDATE SET
-                        raw_alerts = EXCLUDED.raw_alerts,
-                        incidents = EXCLUDED.incidents,
-                        noise_cut_pct = EXCLUDED.noise_cut_pct,
-                        flaps_prevented = EXCLUDED.flaps_prevented,
-                        updated = EXCLUDED.updated;
-                    """,
-                    (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, now_iso),
-                )
-            conn.commit()
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO aiops_counters (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, updated)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (tenant_id) DO UPDATE SET
+                            raw_alerts = EXCLUDED.raw_alerts,
+                            incidents = EXCLUDED.incidents,
+                            noise_cut_pct = EXCLUDED.noise_cut_pct,
+                            flaps_prevented = EXCLUDED.flaps_prevented,
+                            updated = EXCLUDED.updated;
+                        """,
+                        (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, now_iso),
+                    )
 
     conn_sq = get_sqlite_conn(db_name)
     cur_sq = conn_sq.cursor()
@@ -1268,6 +1397,264 @@ def update_tenant_counters(
     }
 
 
+def record_aiops_alert(
+    tenant_id: str,
+    title: str,
+    severity: str = "high",
+    source: Optional[str] = "ingest_security",
+    body: Optional[Dict[str, Any]] = None,
+    alert_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Records an alert row into the regional database aiops_alerts table."""
+    a_id = alert_id or f"alt-{uuid.uuid4().hex[:12]}"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+    body_dict = body or {}
+    body_json = json.dumps(body_dict)
+
+    if is_postgres_available():
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO aiops_alerts (alert_id, tenant_id, source, title, severity, body, status, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'open', %s, %s)
+                        ON CONFLICT (alert_id) DO NOTHING;
+                        """,
+                        (a_id, tenant_id, source, title, severity, body_json, now_iso, now_iso),
+                    )
+
+    conn_sq = get_sqlite_conn(db_name)
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR IGNORE INTO aiops_alerts (alert_id, tenant_id, source, title, severity, body, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?);
+        """,
+        (a_id, tenant_id, source, title, severity, body_json, now_iso, now_iso),
+    )
+    conn_sq.commit()
+
+    return {
+        "alert_id": a_id,
+        "tenant_id": tenant_id,
+        "source": source,
+        "title": title,
+        "severity": severity,
+        "body": body_dict,
+        "status": "open",
+        "created_at": now_iso,
+    }
+
+
+def create_action_intent(
+    tenant_id: str,
+    action: str,
+    target: str,
+    risk: str = "low",
+    why: str = "",
+    incident_id: Optional[str] = None,
+    reversible: bool = True,
+    rollback: Optional[str] = None,
+    intent_id: Optional[str] = None,
+    expires_in_s: int = 600,
+) -> Dict[str, Any]:
+    """Creates a proposed action intent in airlock_core with 10-minute expiration and audit entry."""
+    i_id = intent_id or f"act-{uuid.uuid4().hex[:12]}"
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_dt = datetime.fromtimestamp(now_dt.timestamp() + expires_in_s, tz=timezone.utc)
+    expires_iso = expires_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    details = {
+        "why": why,
+        "reversible": reversible,
+        "rollback": rollback,
+    }
+    details_json = json.dumps(details)
+
+    if is_postgres_available():
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO action_intents (
+                            intent_id, incident_id, tenant_id, action, target, risk, status, details, created_at, expires_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, 'proposed', %s, %s, %s)
+                        ON CONFLICT (intent_id) DO NOTHING;
+                        """,
+                        (i_id, incident_id, tenant_id, action, target, risk, details_json, now_iso, expires_iso),
+                    )
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR IGNORE INTO action_intents (
+            intent_id, incident_id, tenant_id, action, target, risk, status, details, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?);
+        """,
+        (i_id, incident_id, tenant_id, action, target, risk, details_json, now_iso, expires_iso),
+    )
+    conn_sq.commit()
+
+    log_action_audit(intent_id=i_id, actor="aiops", step="proposed", details=details)
+
+    return {
+        "intent_id": i_id,
+        "incident_id": incident_id,
+        "tenant_id": tenant_id,
+        "action": action,
+        "target": target,
+        "risk": risk,
+        "status": "proposed",
+        "why": why,
+        "reversible": reversible,
+        "rollback": rollback,
+        "created_at": now_iso,
+        "expires_at": expires_iso,
+    }
+
+
+def get_action_intent(intent_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves an action intent by ID from airlock_core."""
+    query = "SELECT * FROM action_intents WHERE intent_id = %s;" if is_postgres_available() else "SELECT * FROM action_intents WHERE intent_id = ?;"
+    rows = execute_query("airlock_core", query, (intent_id,))
+    if rows:
+        r = dict(rows[0])
+        if isinstance(r.get("details"), str):
+            try:
+                r["details"] = json.loads(r["details"])
+            except Exception:
+                pass
+        return r
+    return None
+
+
+def update_action_intent_status(
+    intent_id: str,
+    status: str,
+    approved_by: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Updates status and approver of an action intent."""
+    if is_postgres_available():
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    if approved_by:
+                        cur.execute(
+                            "UPDATE action_intents SET status = %s, approved_by = %s WHERE intent_id = %s;",
+                            (status, approved_by, intent_id),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE action_intents SET status = %s WHERE intent_id = %s;",
+                            (status, intent_id),
+                        )
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    if approved_by:
+        cur_sq.execute(
+            "UPDATE action_intents SET status = ?, approved_by = ? WHERE intent_id = ?;",
+            (status, approved_by, intent_id),
+        )
+    else:
+        cur_sq.execute(
+            "UPDATE action_intents SET status = ? WHERE intent_id = ?;",
+            (status, intent_id),
+        )
+    conn_sq.commit()
+    return get_action_intent(intent_id)
+
+
+def count_recent_intents(tenant_id: str, window_seconds: int = 600) -> int:
+    """Counts proposed/executed intents for a tenant within the sliding window."""
+    cutoff = datetime.fromtimestamp(time.time() - window_seconds, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query = (
+        "SELECT COUNT(*) AS cnt FROM action_intents WHERE tenant_id = %s AND created_at >= %s;"
+        if is_postgres_available()
+        else "SELECT COUNT(*) AS cnt FROM action_intents WHERE tenant_id = ? AND created_at >= ?;"
+    )
+    rows = execute_query("airlock_core", query, (tenant_id, cutoff))
+    if rows:
+        return int(rows[0].get("cnt", 0))
+    return 0
+
+
+def list_pending_action_intents(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Lists approved intents that have not expired."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query = (
+        "SELECT * FROM action_intents WHERE status = 'approved' AND (expires_at IS NULL OR expires_at > %s)"
+        if is_postgres_available()
+        else "SELECT * FROM action_intents WHERE status = 'approved' AND (expires_at IS NULL OR expires_at > ?)"
+    )
+    params = [now_iso]
+    if tenant_id and tenant_id != "all":
+        query += " AND tenant_id = %s" if is_postgres_available() else " AND tenant_id = ?"
+        params.append(tenant_id)
+    query += " ORDER BY created_at ASC;"
+    rows = execute_query("airlock_core", query, tuple(params))
+    return [dict(r) for r in rows]
+
+
+def log_action_audit(
+    intent_id: Optional[str],
+    actor: str,
+    step: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Logs an action intent lifecycle event in action_audit."""
+    event_id = f"actaud-{uuid.uuid4().hex[:12]}"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    details_json = json.dumps(details or {})
+
+    if is_postgres_available():
+        try:
+            pool = get_db_pool("airlock_core")
+            with pool.connection() as conn:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO action_audit (event_id, intent_id, actor, step, details, at)
+                            VALUES (%s, %s, %s, %s, %s, %s);
+                            """,
+                            (event_id, intent_id, actor, step, details_json, now_iso),
+                        )
+        except Exception:
+            pass
+
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT INTO action_audit (event_id, intent_id, actor, step, details, at)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (event_id, intent_id, actor, step, details_json, now_iso),
+    )
+    conn_sq.commit()
+    return event_id
+
+
+def get_action_audit_logs(intent_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Returns action audit entries."""
+    query = "SELECT * FROM action_audit WHERE 1=1"
+    params = []
+    if intent_id:
+        query += " AND intent_id = %s" if is_postgres_available() else " AND intent_id = ?"
+        params.append(intent_id)
+    query += " ORDER BY at DESC LIMIT %s;" if is_postgres_available() else " ORDER BY at DESC LIMIT ?;"
+    params.append(limit)
+    rows = execute_query("airlock_core", query, tuple(params))
+    return [dict(r) for r in rows]
+
+
 def truncate_all_data():
     """Truncates/clears all dynamic test data to ensure test independence."""
     regional_tables = [
@@ -1287,6 +1674,8 @@ def truncate_all_data():
         "audit_log",
         "leak_counters",
         "reveal_requests",
+        "action_intents",
+        "action_audit",
     ]
     if is_postgres_available():
         for db in ("airlock_in", "airlock_eu"):

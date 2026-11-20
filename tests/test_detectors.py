@@ -29,7 +29,7 @@ def test_auth_burst_50_wrong_passwords_produces_one_burst_event(tmp_path):
     service_pseudo = "proc-11223344"
     attacker_ip = "198.51.100.42"
 
-    # 1. Simulate 50 wrong password attempts
+    # 1. Loop with 0.6s sleeps between 50 logins (simulated)
     now = time.time()
     for i in range(50):
         events = detector.record_login(
@@ -37,17 +37,20 @@ def test_auth_burst_50_wrong_passwords_produces_one_burst_event(tmp_path):
             raw_ip=attacker_ip,
             success=False,
             service_pseudonym=service_pseudo,
-            timestamp=now + (i * 0.1),
+            timestamp=now + (i * 0.6),
         )
         assert len(events) == 0  # Bursts are evaluated per window
 
-    # Mid-burst check (at 30 failures, quiet_time < 0.5s): must NOT prematurely emit at 30
-    mid_burst = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=now + 3.0)
+    last_attempt_ts = now + (49 * 0.6)
+
+    # Mid-burst check (while still ongoing, e.g. 1s after last failure; quiet_time < 4.0s):
+    # must NOT prematurely emit
+    mid_burst = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=last_attempt_ts + 1.0)
     assert len(mid_burst) == 0
 
-    # 2. Evaluate burst at completion (quiet_time >= 0.5s after last failure at now + 4.9s):
+    # 2. Evaluate burst at completion (4s quiet window elapsed: quiet_time >= 4.0s):
     # must produce EXACTLY ONE auth_failure_burst with count=50
-    burst_events = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=now + 5.5)
+    burst_events = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=last_attempt_ts + 4.1)
     assert len(burst_events) == 1
     ev = burst_events[0]
     assert ev.category == "auth_failure_burst"
@@ -58,8 +61,77 @@ def test_auth_burst_50_wrong_passwords_produces_one_burst_event(tmp_path):
     assert "user_" not in ev.actor  # Zero usernames
 
     # Subsequent evaluation in same window produces no duplicate
-    second_eval = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=now + 6.0)
+    second_eval = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=last_attempt_ts + 5.0)
     assert len(second_eval) == 0
+
+
+def test_auth_burst_29_wrong_passwords_produces_none(tmp_path):
+    reveal_db = str(tmp_path / "reveal_auth_29.db")
+    mgr = PseudonymManager(tenant_secret="secret-salt-test", db_path=reveal_db)
+    detector = AuthDetector(pseudonym_mgr=mgr, tenant_tz_str="Asia/Kolkata")
+
+    service_pseudo = "proc-11223344"
+    attacker_ip = "198.51.100.43"
+
+    now = time.time()
+    for i in range(29):
+        detector.record_login(
+            raw_username=f"user_{i}",
+            raw_ip=attacker_ip,
+            success=False,
+            service_pseudonym=service_pseudo,
+            timestamp=now + (i * 0.6),
+        )
+
+    last_attempt_ts = now + (28 * 0.6)
+    # After 4s quiet period, 29 failures (< 30) must give none
+    burst_events = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=last_attempt_ts + 4.1)
+    assert len(burst_events) == 0
+
+
+def test_auth_burst_two_bursts_10s_apart_gives_two_events(tmp_path):
+    reveal_db = str(tmp_path / "reveal_auth_two.db")
+    mgr = PseudonymManager(tenant_secret="secret-salt-test", db_path=reveal_db)
+    detector = AuthDetector(pseudonym_mgr=mgr, tenant_tz_str="Asia/Kolkata")
+
+    service_pseudo = "proc-11223344"
+    attacker_ip = "198.51.100.44"
+
+    # Burst 1: 35 logins with 0.5s intervals
+    t0 = 1000.0
+    for i in range(35):
+        detector.record_login(
+            raw_username=f"user_b1_{i}",
+            raw_ip=attacker_ip,
+            success=False,
+            service_pseudonym=service_pseudo,
+            timestamp=t0 + (i * 0.5),
+        )
+
+    end_b1 = t0 + (34 * 0.5)
+    # 4.1s quiet period finishes Burst 1
+    ev1 = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=end_b1 + 4.1)
+    assert len(ev1) == 1
+    assert ev1[0].count == 35
+
+    # 10s gap after burst 1 finishes
+    t_gap = end_b1 + 4.1 + 10.0
+
+    # Burst 2: 40 logins with 0.5s intervals
+    for i in range(40):
+        detector.record_login(
+            raw_username=f"user_b2_{i}",
+            raw_ip=attacker_ip,
+            success=False,
+            service_pseudonym=service_pseudo,
+            timestamp=t_gap + (i * 0.5),
+        )
+
+    end_b2 = t_gap + (39 * 0.5)
+    # 4.1s quiet period finishes Burst 2
+    ev2 = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=end_b2 + 4.1)
+    assert len(ev2) == 1
+    assert ev2[0].count == 40
 
 
 def test_honeypot_and_login_after_failures_and_odd_hour(tmp_path):
