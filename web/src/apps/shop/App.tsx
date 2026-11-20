@@ -270,6 +270,13 @@ export const ShopApp: React.FC = () => {
 
         {/* Security & Boundary Badges */}
         <div className="flex items-center space-x-3 text-xs">
+          <a
+            href="/"
+            className="px-2.5 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/30 text-xs font-bold transition-colors inline-flex items-center space-x-1"
+          >
+            <span>CLOUD DASHBOARD</span>
+            <span>↗</span>
+          </a>
           <span className="hidden md:inline px-2.5 py-1 rounded bg-black/40 text-slate-300 border border-white/5 text-[10px]">
             NODE: <strong className="text-white">SYSTEM 1 (EDGE)</strong>
           </span>

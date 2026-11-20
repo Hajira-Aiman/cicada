@@ -155,6 +155,17 @@ export const TopNav: React.FC = () => {
             {currentUserId ? `${currentUserId}` : 'LOGIN'}
           </button>
 
+          {/* Local Guard Quick Switcher */}
+          <a
+            href="/shop.html"
+            target="_blank"
+            rel="noreferrer"
+            className="px-2.5 py-1 rounded bg-lime-500/10 hover:bg-lime-500/20 text-lime-400 border border-lime-500/30 text-xs font-bold transition-colors hidden sm:inline-flex items-center space-x-1"
+          >
+            <span>LOCAL GUARD</span>
+            <span>↗</span>
+          </a>
+
           {/* Copilot Drawer Toggle */}
           <button
             onClick={() => setCopilotOpen(!copilotOpen)}
