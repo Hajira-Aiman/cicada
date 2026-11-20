@@ -20,12 +20,14 @@ from hq.db import (
     init_all_databases,
     register_guard,
     store_payload,
+    truncate_all_data,
 )
 
 
 @pytest.fixture(autouse=True)
 def setup_db():
     init_all_databases()
+    truncate_all_data()
 
 
 @pytest.mark.anyio

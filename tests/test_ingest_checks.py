@@ -15,13 +15,14 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 
 from hq.db import (
+    execute_query,
     get_audit_logs,
-    get_leak_badge_count,
     get_guard_reconciliation,
+    get_leak_badge_count,
     init_all_databases,
     register_guard,
     set_tenant_pinned_policy,
-    execute_query,
+    truncate_all_data,
 )
 from hq.ingest.main import create_ingest_app
 
@@ -84,6 +85,7 @@ def make_payload(
 @pytest.fixture(autouse=True)
 def setup_test_db():
     init_all_databases()
+    truncate_all_data()
     register_guard("guard-acme-01", "acme", "sec-acme-super-secret-key-2026")
     set_tenant_pinned_policy("acme", "sha256:v1-default-policy,sha256:ab1289cf001e35a9")
 

@@ -116,8 +116,8 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
             );
             INSERT OR IGNORE INTO region_states (region, is_paused) VALUES ('in', 0), ('eu', 0);
             INSERT OR IGNORE INTO tenants (tenant_id, name, assigned_region, pinned_policy_hash) VALUES
-                ('acme', 'Acme Shop A', 'in', 'sha256:v1-default-policy'),
-                ('globex', 'Globex Shop B', 'eu', 'sha256:ab1289cf001e35a9'),
+                ('acme', 'Acme Shop A', 'in', 'sha256:v1-default-policy,sha256:ab1289cf001e35a9'),
+                ('globex', 'Globex Shop B', 'eu', 'sha256:ab1289cf001e35a9,sha256:v1-default-policy'),
                 ('contoso', 'Contoso Organizer', 'in', 'sha256:ab1289cf001e35a9'),
                 ('guests', 'Judges Phones', 'eu', 'sha256:v1-default-policy');
             INSERT OR IGNORE INTO guards (guard_id, tenant_id, hmac_secret) VALUES
@@ -231,6 +231,14 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 status TEXT DEFAULT 'open',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS aiops_counters (
+                tenant_id TEXT PRIMARY KEY,
+                raw_alerts INTEGER DEFAULT 0,
+                incidents INTEGER DEFAULT 0,
+                noise_cut_pct REAL DEFAULT 0.0,
+                flaps_prevented INTEGER DEFAULT 0,
+                updated TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
     conn.commit()
@@ -435,9 +443,11 @@ def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) 
                     conn.commit()
                     res = "stored"
 
-    # Always mirror to in-memory SQLite for test harnesses inspecting get_sqlite_conn
-    _store_sqlite(db_name, payload_dict, sha256_hash, now_iso)
-    return res
+    if is_postgres_available():
+        # Mirror to in-memory SQLite for test harnesses inspecting get_sqlite_conn
+        _store_sqlite(db_name, payload_dict, sha256_hash, now_iso)
+        return res
+    return _store_sqlite(db_name, payload_dict, sha256_hash, now_iso)
 
 
 AUTH_SECRET = os.getenv("AUTH_SECRET", "airlock-head-office-session-secret-2026")
@@ -537,7 +547,13 @@ def execute_query(
     else:
         conn = get_sqlite_conn(db_name)
         cur = conn.cursor()
-        cur.execute(query, params)
+        sqlite_query = (
+            query.replace("%s", "?")
+            .replace("::text", "")
+            .replace("NOW()", "CURRENT_TIMESTAMP")
+            .replace("now()", "CURRENT_TIMESTAMP")
+        )
+        cur.execute(sqlite_query, params)
         if cur.description:
             rows = [dict(r) for r in cur.fetchall()]
             if tenant_id and tenant_id != "all" and db_name in ("airlock_in", "airlock_eu"):
@@ -1169,25 +1185,134 @@ def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, An
 
 
 def get_tenant_counters(tenant_id: str) -> Dict[str, Any]:
-    """Aggregates telemetry counters: raw alerts N, incidents M, flaps prevented."""
+    """Reads telemetry counters for tenant from aiops_counters table written by AIOps worker."""
     assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
     db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
 
-    q_alerts = "SELECT COUNT(*) as count FROM aiops_alerts WHERE tenant_id = %s;" if is_postgres_available() else "SELECT COUNT(*) as count FROM aiops_alerts WHERE tenant_id = ?;"
-    r_alerts = execute_query(db_name, q_alerts, (tenant_id,))
-    raw_alerts = int(r_alerts[0]["count"]) if r_alerts else 0
+    query = (
+        "SELECT tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, updated FROM aiops_counters WHERE tenant_id = %s;"
+        if is_postgres_available()
+        else "SELECT tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, updated FROM aiops_counters WHERE tenant_id = ?;"
+    )
+    rows = execute_query(db_name, query, (tenant_id,))
+    if rows:
+        r = rows[0]
+        return {
+            "tenant_id": r["tenant_id"],
+            "raw_alerts": int(r.get("raw_alerts") or 0),
+            "incidents": int(r.get("incidents") or 0),
+            "noise_cut_pct": float(r.get("noise_cut_pct") or 0.0),
+            "flaps_prevented": int(r.get("flaps_prevented") or 0),
+            "updated": str(r.get("updated") or ""),
+        }
+    return {
+        "tenant_id": tenant_id,
+        "raw_alerts": 0,
+        "incidents": 0,
+        "noise_cut_pct": 0.0,
+        "flaps_prevented": 0,
+        "updated": None,
+    }
 
-    q_inc = "SELECT COUNT(*) as count FROM incidents WHERE tenant_id = %s;" if is_postgres_available() else "SELECT COUNT(*) as count FROM incidents WHERE tenant_id = ?;"
-    r_inc = execute_query(db_name, q_inc, (tenant_id,))
-    incidents = int(r_inc[0]["count"]) if r_inc else 0
 
-    q_flaps = "SELECT COALESCE(SUM(flaps_prevented), 0) as total FROM health_current WHERE tenant_id = %s;" if is_postgres_available() else "SELECT COALESCE(SUM(flaps_prevented), 0) as total FROM health_current WHERE tenant_id = ?;"
-    r_flaps = execute_query(db_name, q_flaps, (tenant_id,))
-    flaps = int(r_flaps[0]["total"]) if r_flaps else 0
+def update_tenant_counters(
+    tenant_id: str,
+    raw_alerts: int,
+    incidents: int,
+    noise_cut_pct: float,
+    flaps_prevented: int,
+) -> Dict[str, Any]:
+    """Writes telemetry counters into aiops_counters table (matches hq/aiops/worker.py write shape)."""
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO aiops_counters (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, updated)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (tenant_id) DO UPDATE SET
+                        raw_alerts = EXCLUDED.raw_alerts,
+                        incidents = EXCLUDED.incidents,
+                        noise_cut_pct = EXCLUDED.noise_cut_pct,
+                        flaps_prevented = EXCLUDED.flaps_prevented,
+                        updated = EXCLUDED.updated;
+                    """,
+                    (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, now_iso),
+                )
+            conn.commit()
+
+    conn_sq = get_sqlite_conn(db_name)
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR REPLACE INTO aiops_counters (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, updated)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (tenant_id, raw_alerts, incidents, noise_cut_pct, flaps_prevented, now_iso),
+    )
+    conn_sq.commit()
 
     return {
         "tenant_id": tenant_id,
         "raw_alerts": raw_alerts,
         "incidents": incidents,
-        "flaps_prevented": flaps,
+        "noise_cut_pct": noise_cut_pct,
+        "flaps_prevented": flaps_prevented,
+        "updated": now_iso,
     }
+
+
+def truncate_all_data():
+    """Truncates/clears all dynamic test data to ensure test independence."""
+    regional_tables = [
+        "payloads",
+        "metrics",
+        "events",
+        "receipts",
+        "health_history",
+        "health_current",
+        "incidents",
+        "aiops_alerts",
+        "aiops_counters",
+        "guard_reconciliation",
+        "feedback",
+    ]
+    core_tables = [
+        "audit_log",
+        "leak_counters",
+        "reveal_requests",
+    ]
+    if is_postgres_available():
+        for db in ("airlock_in", "airlock_eu"):
+            with psycopg.connect(
+                host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db
+            ) as conn:
+                with conn.cursor() as cur:
+                    for tbl in regional_tables:
+                        cur.execute(f"TRUNCATE TABLE {tbl} CASCADE;")
+                conn.commit()
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+        ) as conn:
+            with conn.cursor() as cur:
+                for tbl in core_tables:
+                    cur.execute(f"TRUNCATE TABLE {tbl} CASCADE;")
+            conn.commit()
+    else:
+        for db in ("airlock_in", "airlock_eu"):
+            conn = get_sqlite_conn(db)
+            cur = conn.cursor()
+            for tbl in regional_tables:
+                cur.execute(f"DELETE FROM {tbl};")
+            conn.commit()
+        conn = get_sqlite_conn("airlock_core")
+        cur = conn.cursor()
+        for tbl in core_tables:
+            cur.execute(f"DELETE FROM {tbl};")
+        conn.commit()

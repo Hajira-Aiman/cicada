@@ -21,6 +21,7 @@ from hq.db import (
     init_all_databases,
     register_guard,
     set_region_paused,
+    truncate_all_data,
 )
 from hq.ingest.main import create_ingest_app
 
@@ -28,6 +29,7 @@ from hq.ingest.main import create_ingest_app
 @pytest.fixture(autouse=True)
 def ensure_db_clean():
     init_all_databases()
+    truncate_all_data()
     set_region_paused("in", False)
     set_region_paused("eu", False)
 

@@ -241,6 +241,8 @@ ALTER TABLE health_current FORCE ROW LEVEL SECURITY;
 ALTER TABLE incidents FORCE ROW LEVEL SECURITY;
 ALTER TABLE aiops_alerts FORCE ROW LEVEL SECURITY;
 ALTER TABLE guard_reconciliation FORCE ROW LEVEL SECURITY;
+ALTER TABLE aiops_counters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE aiops_counters FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation_payloads ON payloads;
 CREATE POLICY tenant_isolation_payloads ON payloads FOR ALL USING (
@@ -306,11 +308,19 @@ CREATE POLICY tenant_isolation_guard_recon ON guard_reconciliation FOR ALL USING
     OR tenant_id = current_setting('app.current_tenant', true)
 );
 
+DROP POLICY IF EXISTS tenant_isolation_aiops_counters ON aiops_counters;
+CREATE POLICY tenant_isolation_aiops_counters ON aiops_counters FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
 -- Permissions for AIOps worker role
 GRANT CONNECT ON DATABASE airlock_in TO aiops_worker;
 GRANT USAGE ON SCHEMA public TO aiops_worker;
 GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
-GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;
 
 -- Database 3: airlock_eu (Europe Region)
@@ -456,6 +466,8 @@ ALTER TABLE health_current FORCE ROW LEVEL SECURITY;
 ALTER TABLE incidents FORCE ROW LEVEL SECURITY;
 ALTER TABLE aiops_alerts FORCE ROW LEVEL SECURITY;
 ALTER TABLE guard_reconciliation FORCE ROW LEVEL SECURITY;
+ALTER TABLE aiops_counters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE aiops_counters FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation_payloads ON payloads;
 CREATE POLICY tenant_isolation_payloads ON payloads FOR ALL USING (
@@ -521,9 +533,17 @@ CREATE POLICY tenant_isolation_guard_recon ON guard_reconciliation FOR ALL USING
     OR tenant_id = current_setting('app.current_tenant', true)
 );
 
+DROP POLICY IF EXISTS tenant_isolation_aiops_counters ON aiops_counters;
+CREATE POLICY tenant_isolation_aiops_counters ON aiops_counters FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
 -- Permissions for AIOps worker role
 GRANT CONNECT ON DATABASE airlock_eu TO aiops_worker;
 GRANT USAGE ON SCHEMA public TO aiops_worker;
 GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
-GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;
