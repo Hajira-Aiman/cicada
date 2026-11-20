@@ -1,0 +1,13 @@
+﻿{
+  "name": "superpowers",
+  "displayName": "Superpowers",
+  "version": "7.0.2",
+  "description": "Make your coding agent a better engineer",
+  "author": {
+    "name": "Jesse Vincent",
+    "email": "jesse@fsck.com"
+  },
+  "homepage": "https://github.com/obra/superpowers",
+  "repository": "https://github.com/obra/superpowers",
+  "license": "MIT"
+}

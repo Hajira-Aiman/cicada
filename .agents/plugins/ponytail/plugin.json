@@ -1,0 +1,12 @@
+﻿{
+  "name": "ponytail",
+  "displayName": "Ponytail",
+  "version": "5.3.3",
+  "description": "Lazy senior developer mode for AI coding assistants",
+  "author": {
+    "name": "Dietrich Gebert"
+  },
+  "homepage": "https://github.com/DietrichGebert/ponytail",
+  "repository": "https://github.com/DietrichGebert/ponytail",
+  "license": "MIT"
+}
