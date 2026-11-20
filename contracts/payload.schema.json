@@ -1,0 +1,182 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AirlockPayloadV1",
+  "description": "Strict allow-list telemetry envelope for Airlock v1. Free text and unapproved fields are forbidden.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "payload_id",
+    "tenant_id",
+    "guard_id",
+    "seq",
+    "prev_hash",
+    "policy_version",
+    "sent_at",
+    "window",
+    "metrics",
+    "events",
+    "log_patterns",
+    "health"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "enum": ["airlock.v1"]
+    },
+    "payload_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "tenant_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{2,32}$"
+    },
+    "guard_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{2,32}$"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "prev_hash": {
+      "type": "string",
+      "pattern": "^(GENESIS|sha256:[0-9a-f]{64})$"
+    },
+    "policy_version": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-fA-Za-z_-]{1,64}$"
+    },
+    "sent_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "source_tz"],
+      "properties": {
+        "start": { "type": "string", "format": "date-time" },
+        "end": { "type": "string", "format": "date-time" },
+        "source_tz": { "type": "string" }
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "source", "avg", "max"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": [
+              "cpu_pct",
+              "mem_pct",
+              "disk_pct",
+              "net_in_kbps",
+              "net_out_kbps",
+              "latency_ms",
+              "packet_loss_pct",
+              "service_up",
+              "battery_pct",
+              "on_battery",
+              "battery_min_left"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "pattern": "^(host|src|user|proc)-[0-9a-f]{8}$"
+          },
+          "avg": { "type": "number" },
+          "max": { "type": "number" }
+        }
+      }
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["category", "severity", "source", "count", "window_s"],
+        "properties": {
+          "category": {
+            "type": "string",
+            "enum": [
+              "auth_failure_burst",
+              "login_after_failures",
+              "honeypot_hit",
+              "odd_hour_login",
+              "service_down",
+              "new_log_pattern",
+              "log_pattern_spike",
+              "power_on_battery",
+              "secret_redacted",
+              "app_restarted",
+              "version_changed",
+              "config_changed",
+              "new_process"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["info", "low", "medium", "high", "critical"]
+          },
+          "source": {
+            "type": "string",
+            "pattern": "^(host|src|user|proc)-[0-9a-f]{8}$"
+          },
+          "actor": {
+            "type": "string",
+            "pattern": "^(host|src|user|proc)-[0-9a-f]{8}$"
+          },
+          "count": { "type": "integer", "minimum": 1 },
+          "window_s": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "log_patterns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pattern_id", "level", "count", "is_new"],
+        "properties": {
+          "pattern_id": {
+            "type": "string",
+            "pattern": "^tpl-[0-9a-f]{4,16}$"
+          },
+          "level": {
+            "type": "string",
+            "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+          },
+          "count": { "type": "integer", "minimum": 1 },
+          "is_new": { "type": "boolean" }
+        }
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "guard_version",
+        "guard_cpu_pct",
+        "guard_mem_mb",
+        "buffer_depth",
+        "config_ok",
+        "canaries_planted",
+        "secrets_redacted"
+      ],
+      "properties": {
+        "guard_version": { "type": "string" },
+        "guard_cpu_pct": { "type": "number" },
+        "guard_mem_mb": { "type": "number" },
+        "buffer_depth": { "type": "integer", "minimum": 0 },
+        "config_ok": { "type": "boolean" },
+        "canaries_planted": { "type": "integer", "minimum": 0 },
+        "secrets_redacted": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
