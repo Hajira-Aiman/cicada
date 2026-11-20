@@ -9,10 +9,14 @@ Log File Tailer & Event Normalizer (T3, T16):
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, List, Optional
 
 logger = logging.getLogger("airlock.guard.tailer")
+
+SSH_FAIL_PATTERN = re.compile(r"Failed password for (?:invalid user )?(\S+) from (\S+) port \d+ ssh2")
+SSH_SUCCESS_PATTERN = re.compile(r"Accepted (?:password|publickey) for (\S+) from (\S+) port \d+ ssh2")
 
 
 class LogTailer:
@@ -51,8 +55,10 @@ class LogTailer:
             self.guard.process_log_line(line, source="shop-api")
 
             # 2. Parse structured events (e.g. login attempts)
+            parsed_json = False
             try:
                 data = json.loads(line)
+                parsed_json = True
                 ev = data.get("event")
                 ts = data.get("timestamp")
                 if ev == "login_failure":
@@ -65,5 +71,17 @@ class LogTailer:
                     self.guard.record_login(raw_username=username, raw_ip=ip, success=True, timestamp=ts)
             except Exception:
                 pass
+
+            # 3. Parse syslog / sshd auth.log lines (Linux /var/log/auth.log)
+            if not parsed_json:
+                m_fail = SSH_FAIL_PATTERN.search(line)
+                if m_fail:
+                    user, ip = m_fail.group(1), m_fail.group(2)
+                    self.guard.record_login(raw_username=user, raw_ip=ip, success=False)
+                else:
+                    m_ok = SSH_SUCCESS_PATTERN.search(line)
+                    if m_ok:
+                        user, ip = m_ok.group(1), m_ok.group(2)
+                        self.guard.record_login(raw_username=user, raw_ip=ip, success=True)
 
         return len(lines)
