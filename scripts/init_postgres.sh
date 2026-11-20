@@ -21,9 +21,11 @@ else
 fi
 
 echo "Waiting for PostgreSQL to be ready..."
+sleep 2
 until docker exec $CONTAINER_NAME pg_isready -U postgres > /dev/null 2>&1; do
     sleep 1
 done
+sleep 1
 
 echo "Executing scripts/init_postgres.sql..."
 docker exec -i $CONTAINER_NAME psql -U postgres < "$(dirname "$0")/init_postgres.sql" || true
