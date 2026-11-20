@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS events (
     severity VARCHAR(32) NOT NULL,
     actor VARCHAR(64),
     count INT NOT NULL,
+    window_s INT DEFAULT 2,
     event_time TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
@@ -97,6 +98,48 @@ CREATE TABLE IF NOT EXISTS receipts (
     sha256 VARCHAR(128) NOT NULL,
     received_at TIMESTAMP WITH TIME ZONE NOT NULL,
     status VARCHAR(32) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS health_history (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64),
+    source VARCHAR(64),
+    state VARCHAR(32),
+    old_state VARCHAR(32),
+    reasons JSONB,
+    at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE IF NOT EXISTS health_current (
+    tenant_id VARCHAR(64),
+    source VARCHAR(64),
+    state VARCHAR(32),
+    reasons JSONB,
+    since TIMESTAMP WITH TIME ZONE,
+    flaps_prevented INT DEFAULT 0,
+    updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY(tenant_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    body JSONB NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'open',
+    started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS tenant_thresholds (
+    tenant_id VARCHAR(64) PRIMARY KEY,
+    config JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    alert_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Database 3: airlock_eu (Europe Region)
@@ -136,6 +179,7 @@ CREATE TABLE IF NOT EXISTS events (
     severity VARCHAR(32) NOT NULL,
     actor VARCHAR(64),
     count INT NOT NULL,
+    window_s INT DEFAULT 2,
     event_time TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
@@ -145,4 +189,46 @@ CREATE TABLE IF NOT EXISTS receipts (
     sha256 VARCHAR(128) NOT NULL,
     received_at TIMESTAMP WITH TIME ZONE NOT NULL,
     status VARCHAR(32) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS health_history (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64),
+    source VARCHAR(64),
+    state VARCHAR(32),
+    old_state VARCHAR(32),
+    reasons JSONB,
+    at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE IF NOT EXISTS health_current (
+    tenant_id VARCHAR(64),
+    source VARCHAR(64),
+    state VARCHAR(32),
+    reasons JSONB,
+    since TIMESTAMP WITH TIME ZONE,
+    flaps_prevented INT DEFAULT 0,
+    updated TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    PRIMARY KEY(tenant_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    body JSONB NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'open',
+    started_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS tenant_thresholds (
+    tenant_id VARCHAR(64) PRIMARY KEY,
+    config JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    alert_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

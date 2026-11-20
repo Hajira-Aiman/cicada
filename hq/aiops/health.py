@@ -9,7 +9,7 @@ Stale Data: 10s -> Fair; 30s -> Poor (Offline).
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
-from contracts.models import HealthState, HealthTransition
+from contracts.models import HealthChange, HealthState, HealthTransition
 
 STATE_RANKS: Dict[HealthState, int] = {
     "Excellent": 0,
@@ -137,13 +137,13 @@ class SourceHealthTracker:
             self.last_transition_reasons = raw_reasons
             now_iso = datetime.fromtimestamp(now_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-            transition = HealthTransition(
+            transition = HealthChange(
                 tenant_id=self.tenant_id,
                 source=self.source,
+                state=self.confirmed_state,
                 old_state=old_state,
-                new_state=self.confirmed_state,
                 reasons=raw_reasons,
-                transition_at=now_iso,
+                at=now_iso,
             )
             self.transitions.append(transition)
             self.candidate_duration_steps = 0

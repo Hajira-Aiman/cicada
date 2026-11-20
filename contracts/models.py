@@ -5,6 +5,7 @@ Strict allow-list schema: extra fields are forbidden.
 Free text and unapproved identifiers cannot cross the trust boundary.
 """
 
+from enum import Enum
 from typing import Annotated, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
@@ -42,6 +43,25 @@ EventCategory = Literal[
 ]
 
 SeverityLevel = Literal["info", "low", "medium", "high", "critical"]
+
+
+class Severity(str, Enum):
+    INFO = "info"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class ActionType(str, Enum):
+    KILL_PROCESS = "kill_process"
+    RESTART_SERVICE = "restart_service"
+    BLOCK_SOURCE = "block_source"
+    BLOCK_IP = "block_ip"
+    INVESTIGATE = "investigate"
+    DRY_RUN = "dry_run"
+
+
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 HealthState = Literal["Excellent", "Good", "Fair", "Poor"]
 
@@ -91,7 +111,7 @@ class GuardHealth(BaseModel):
 
 
 class AirlockPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, title="AirlockPayloadV1")
     schema_version: Literal["airlock.v1"] = Field(
         default="airlock.v1",
         alias="schema",
@@ -123,7 +143,7 @@ class ActionIntent(BaseModel):
     model_config = ConfigDict(extra="forbid")
     intent_id: str
     tenant_id: str
-    action: Literal["kill_process", "block_ip", "restart_service"]
+    action: Literal["kill_process", "block_source", "block_ip", "restart_service", "investigate", "dry_run"]
     target: str
     timestamp: str  # ISO-8601 UTC with Z
     signature: str
@@ -149,11 +169,11 @@ class SignalEvidence(BaseModel):
 
 class ActionRecommendation(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["kill_process", "block_ip", "restart_service", "investigate"]
+    action: Literal["kill_process", "block_source", "block_ip", "restart_service", "investigate"]
     target: Optional[str] = None
     why: str
-    risk: Literal["low", "medium", "high"]
-    reversible: bool
+    risk: Literal["low", "medium", "high"] = "low"
+    reversible: bool = True
     rollback: Optional[str] = None
 
 
@@ -170,17 +190,25 @@ class Incident(BaseModel):
     reasoning_path: List[str] = Field(default_factory=list)
     counterfactual: Optional[str] = None
     recommendation: Optional[ActionRecommendation] = None
+    changes_before: List[str] = Field(default_factory=list)
+    suppressed_reason: Optional[str] = None
+    repeat_count: int = Field(default=1, ge=1)
     narrative: Optional[str] = None
 
 
-class HealthTransition(BaseModel):
+class HealthChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
     tenant_id: str
-    source: Pseudonym
-    old_state: HealthState
-    new_state: HealthState
-    reasons: List[str]
-    transition_at: str  # ISO-8601 UTC with Z
+    source: str
+    state: str
+    old_state: Optional[str] = None
+    reasons: List[str] = Field(default_factory=list)
+    at: str  # ISO-8601 UTC with Z
+
+
+# Kept HealthChange as official model; HealthTransition is an alias
+HealthTransition = HealthChange
+Recommendation = ActionRecommendation
 
 
 class RevealRequest(BaseModel):
@@ -202,37 +230,8 @@ class WSMessage(BaseModel):
     payload: dict
 
 
-class HealthChange(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    tenant_id: str
-    source: str
-    state: str
-    old_state: Optional[str] = None
-    reasons: List[str]
-    at: str  # UTC ISO-8601 Z
-
-
-class Signal(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    evidence_id: str
-    name: str
-    value: float
-    baseline: float
-    z: Optional[float] = None
-    contribution_pct: float
-
-
-class Recommendation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    action: Literal["kill_process", "block_source", "block_ip", "restart_service", "investigate"]
-    target: Optional[str] = None
-    why: str
-    risk: Literal["low", "medium", "high"]
-    reversible: bool
-    rollback: Optional[str] = None
-
-
 # Cross-branch contract aliases
+Signal = SignalEvidence
 PayloadV1 = AirlockPayload
 Payload = AirlockPayload
 SignedReceipt = IngestReceipt

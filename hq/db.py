@@ -130,6 +130,7 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 severity TEXT NOT NULL,
                 actor TEXT,
                 count INTEGER NOT NULL,
+                window_s INTEGER DEFAULT 2,
                 event_time TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS receipts (
@@ -138,6 +139,43 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 sha256 TEXT NOT NULL,
                 received_at TEXT NOT NULL,
                 status TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS health_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT,
+                source TEXT,
+                state TEXT,
+                old_state TEXT,
+                reasons TEXT,
+                at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS health_current (
+                tenant_id TEXT,
+                source TEXT,
+                state TEXT,
+                reasons TEXT,
+                since TEXT,
+                flaps_prevented INTEGER DEFAULT 0,
+                updated TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(tenant_id, source)
+            );
+            CREATE TABLE IF NOT EXISTS incidents (
+                incident_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                body TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                started_at TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS tenant_thresholds (
+                tenant_id TEXT PRIMARY KEY,
+                config TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS feedback (
+                alert_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                at TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
     conn.commit()
@@ -261,10 +299,10 @@ def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) 
                 for e in payload_dict.get("events", []):
                     cur.execute(
                         """
-                        INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, event_time)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+                        INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
                         """,
-                        (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], window_start),
+                        (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), window_start),
                     )
 
                 # Record stored receipt
@@ -312,10 +350,10 @@ def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) 
         for e in payload_dict.get("events", []):
             cur.execute(
                 """
-                INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, event_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], window_start),
+                (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), window_start),
             )
 
         cur.execute(
