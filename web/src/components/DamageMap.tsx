@@ -18,7 +18,9 @@ export const DamageMap: React.FC<{ tenant: string }> = ({ tenant }) => {
   const st = Object.fromEntries(map.nodes.map((n) => [n.id, n.state]));
   return (
     <div className="hud-panel p-3">
-      <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400 font-bold">DAMAGE MAP · {tenant.toUpperCase()}</span>
+      <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400 font-bold">
+        DAMAGE TOPOLOGY · {tenant === 'acme' ? 'SYSTEM 1' : tenant === 'globex' ? 'SYSTEM 2' : tenant.toUpperCase()}
+      </span>
       <svg viewBox="0 0 340 110" className="w-full mt-2">
         {map.edges.map((e) => POS[e.from] && POS[e.to] && (
           <line key={e.from + e.to} x1={POS[e.from][0] + 28} y1={POS[e.from][1]} x2={POS[e.to][0] - 28} y2={POS[e.to][1]} stroke="#475569" strokeWidth="1.5" />
