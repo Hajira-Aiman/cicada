@@ -14,6 +14,7 @@ export const IncidentsTab: React.FC = () => {
   const [showAlertsDrawer, setShowAlertsDrawer] = useState(false);
   const counters = useLiveStore((s) => s.counters);
   const activeTenant = useUiStore((s) => s.activeTenant);
+  const setActiveTenant = useUiStore((s) => s.setActiveTenant);
   const setCopilotOpen = useUiStore((s) => s.setCopilotOpen);
 
   const filtered: Incident[] = incidents.filter(
@@ -51,6 +52,24 @@ export const IncidentsTab: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {/* Contextual System Filter Pills */}
+          <div className="flex items-center space-x-1 bg-black/40 p-1 rounded border border-white/10 text-xs">
+            <span className="text-[10px] text-slate-400 font-bold px-1.5 uppercase">SYSTEM:</span>
+            {(['ALL', 'acme', 'globex'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setActiveTenant(t)}
+                className={`px-2 py-0.5 rounded text-[11px] font-bold transition-colors ${
+                  activeTenant === t
+                    ? 'bg-sky-500 text-black shadow-sm'
+                    : 'text-slate-400 hover:text-white hover:bg-white/5'
+                }`}
+              >
+                {t === 'ALL' ? 'ALL' : t === 'acme' ? 'SYS 1' : 'SYS 2'}
+              </button>
+            ))}
+          </div>
+
           <div className="text-right px-4 py-2 rounded bg-black/40 border border-white/5">
             <span className="text-[10px] text-slate-400 uppercase font-bold block">FLAPS PREVENTED</span>
             <span className="text-base font-black text-emerald-400">{counters.flaps_prevented}</span>

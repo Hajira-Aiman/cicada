@@ -1,8 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useUiStore } from '../stores/uiStore';
 import { useLiveStore } from '../stores/liveStore';
-import { startDemoFeed, stopDemoFeed } from '../services/demoFeed';
 import { api } from '../services/apiClient';
 import { GradientASCII } from '../components/GradientASCII';
 
@@ -14,35 +13,13 @@ const TABS = [
 ];
 
 export const TopNav: React.FC = () => {
-  const [utcClock, setUtcClock] = useState('');
   const [loginModalOpen, setLoginModalOpen] = useState(false);
   const [loginUsername, setLoginUsername] = useState('admin');
   const [loginPassword, setLoginPassword] = useState('admin123');
   const [loginError, setLoginError] = useState('');
 
-  const activeTenant = useUiStore((s) => s.activeTenant);
-  const setActiveTenant = useUiStore((s) => s.setActiveTenant);
-  const tzMode = useUiStore((s) => s.tzMode);
-  const setTzMode = useUiStore((s) => s.setTzMode);
-  const copilotOpen = useUiStore((s) => s.copilotOpen);
-  const setCopilotOpen = useUiStore((s) => s.setCopilotOpen);
-  const authRole = useUiStore((s) => s.authRole);
-  const currentUserId = useUiStore((s) => s.currentUserId);
   const setAuth = useUiStore((s) => s.setAuth);
-  const logout = useUiStore((s) => s.logout);
-
   const connected = useLiveStore((s) => s.connected);
-  const mode = useLiveStore((s) => s.mode);
-
-  useEffect(() => {
-    const updateTime = () => {
-      const now = new Date();
-      setUtcClock(now.toISOString().substring(11, 19) + ' UTC');
-    };
-    updateTime();
-    const interval = setInterval(updateTime, 1000);
-    return () => clearInterval(interval);
-  }, []);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,11 +35,15 @@ export const TopNav: React.FC = () => {
 
   return (
     <>
-      <header className="h-14 bg-[#080A10] border-b border-white/[0.08] px-5 flex items-center justify-between z-30 select-none">
+      <header className="h-14 bg-[#080A10] border-b border-white/[0.08] px-5 flex items-center z-30 select-none">
         {/* Brand wordmark + live pulse */}
         <div className="flex items-center space-x-6">
-          <div className="flex items-center space-x-3">
-            <span className="font-mono text-lg font-black tracking-widest text-white">
+          <div
+            onClick={() => setLoginModalOpen(true)}
+            title="Airlock Cloud Dashboard (Click for Auth Gateway)"
+            className="flex items-center space-x-3 cursor-pointer group"
+          >
+            <span className="font-mono text-lg font-black tracking-widest text-white group-hover:text-sky-400 transition-colors">
               AIRLOCK
             </span>
             <span className="text-[11px] font-mono text-slate-500 uppercase tracking-widest font-semibold hidden sm:inline">
@@ -94,89 +75,6 @@ export const TopNav: React.FC = () => {
               </NavLink>
             ))}
           </nav>
-        </div>
-
-        {/* Controls: System Switcher, TZ, Clock, Mode, Copilot */}
-        <div className="flex items-center space-x-3 text-xs font-mono">
-          {/* System Switcher (Replacing Tenant & Eliminating Regions) */}
-          <div className="flex items-center space-x-1.5 bg-[#141721] px-2.5 py-1 rounded border border-white/10">
-            <span className="text-[10px] uppercase text-slate-500 font-bold">SYSTEM:</span>
-            <select
-              value={activeTenant}
-              disabled={authRole === 'customer'}
-              onChange={(e) => setActiveTenant(e.target.value as any)}
-              className="bg-transparent text-slate-200 font-bold focus:outline-none cursor-pointer disabled:cursor-not-allowed"
-            >
-              <option value="ALL" className="bg-[#1A1C23]">ALL SYSTEMS (1 & 2)</option>
-              <option value="acme" className="bg-[#1A1C23]">SYSTEM 1</option>
-              <option value="globex" className="bg-[#1A1C23]">SYSTEM 2</option>
-            </select>
-          </div>
-
-          {/* Time-Zone Mode (Simplified: UTC vs LOCAL) */}
-          <div className="flex items-center bg-[#141721] p-0.5 rounded border border-white/10">
-            {(['UTC', 'VIEWER'] as const).map((tz) => (
-              <button
-                key={tz}
-                onClick={() => setTzMode(tz === 'VIEWER' ? 'VIEWER' : 'UTC')}
-                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                  (tz === 'UTC' && tzMode === 'UTC') || (tz === 'VIEWER' && tzMode !== 'UTC')
-                    ? 'bg-sky-500 text-black'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {tz === 'VIEWER' ? 'LOCAL' : 'UTC'}
-              </button>
-            ))}
-          </div>
-
-          {/* UTC Clock */}
-          <span className="text-slate-300 font-bold tabular-nums hidden md:inline">
-            {utcClock}
-          </span>
-
-          {/* Mode Switch (LIVE / SIMULATED) */}
-          <button
-            onClick={() => (mode === 'LIVE' ? startDemoFeed() : stopDemoFeed())}
-            className={`px-2 py-1 rounded text-[10px] font-bold tracking-wider border ${
-              mode === 'LIVE'
-                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-            }`}
-          >
-            {mode}
-          </button>
-
-          {/* User Button */}
-          <button
-            onClick={() => (currentUserId ? logout() : setLoginModalOpen(true))}
-            className="px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs border border-white/10"
-          >
-            {currentUserId ? `${currentUserId}` : 'LOGIN'}
-          </button>
-
-          {/* Local Guard Quick Switcher */}
-          <a
-            href="/shop.html"
-            target="_blank"
-            rel="noreferrer"
-            className="px-2.5 py-1 rounded bg-lime-500/10 hover:bg-lime-500/20 text-lime-400 border border-lime-500/30 text-xs font-bold transition-colors hidden sm:inline-flex items-center space-x-1"
-          >
-            <span>LOCAL GUARD</span>
-            <span>↗</span>
-          </a>
-
-          {/* Copilot Drawer Toggle */}
-          <button
-            onClick={() => setCopilotOpen(!copilotOpen)}
-            className={`px-3 py-1 rounded text-xs font-bold tracking-wider border transition-colors ${
-              copilotOpen
-                ? 'bg-sky-500 text-black border-sky-400'
-                : 'bg-sky-500/10 text-sky-400 border-sky-500/30 hover:bg-sky-500/20'
-            }`}
-          >
-            AI COPILOT
-          </button>
         </div>
       </header>
 
