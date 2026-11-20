@@ -51,6 +51,70 @@ class TriggerRequest(BaseModel):
     params: Optional[Dict[str, Any]] = None
 
 
+def _exec_action(name: str, duration_s: int):
+    """Executes realistic chaos actions against the local shop environment."""
+    import sys
+    if "pytest" in sys.modules:
+        return
+    shop_url = os.getenv("SHOP_API_URL", "http://127.0.0.1:7000")
+    try:
+        if name in ("brute_force", "login_burst"):
+            import httpx
+            with httpx.Client(base_url=shop_url, timeout=2.0) as client:
+                for i in range(50):
+                    try:
+                        client.post("/auth/login", json={"username": f"user_{i}", "password": f"wrongpass_{i}"})
+                    except Exception:
+                        pass
+                    time.sleep(0.02)
+        elif name == "kill_chain":
+            import httpx
+            with httpx.Client(base_url=shop_url, timeout=2.0) as client:
+                # 1. Burst of 50 failed logins
+                for i in range(50):
+                    try:
+                        client.post("/auth/login", json={"username": "admin", "password": f"wrongpass_{i}"})
+                    except Exception:
+                        pass
+                    time.sleep(0.02)
+                time.sleep(4.5)
+                # 2. Successful login
+                try:
+                    client.post("/auth/login", json={"username": "admin", "password": "correct_password_2026"})
+                except Exception:
+                    pass
+                time.sleep(3.0)
+                # 3. Simulate high CPU utilization and outbound traffic (cryptomining simulation)
+                import socket
+                end_time = time.time() + max(duration_s, 25)
+                def _burn():
+                    while time.time() < end_time:
+                        _ = [x * x for x in range(2000)]
+                def _net():
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    chunk = b"X" * 1400
+                    while time.time() < end_time:
+                        try:
+                            s.sendto(chunk, ("127.0.0.1", 9999))
+                        except Exception:
+                            pass
+                        time.sleep(0.001)
+                burners = [threading.Thread(target=_burn, daemon=True) for _ in range(os.cpu_count() or 4)]
+                net_burners = [threading.Thread(target=_net, daemon=True) for _ in range(4)]
+                for b in burners + net_burners:
+                    b.start()
+        elif name == "cpu_spike":
+            end_time = time.time() + duration_s
+            def _burn():
+                while time.time() < end_time:
+                    _ = [x * x for x in range(2000)]
+            burners = [threading.Thread(target=_burn, daemon=True) for _ in range(os.cpu_count() or 4)]
+            for b in burners:
+                b.start()
+    except Exception:
+        pass
+
+
 def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     with _lock:
         now = time.time()
@@ -66,6 +130,7 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
             "params": params or {},
         }
         _active_scenarios[name] = entry
+        threading.Thread(target=_exec_action, args=(name, duration_s), daemon=True).start()
         return entry
 
 

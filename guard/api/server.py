@@ -134,7 +134,26 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
 
     @api.get("/api/reveal-requests")
     def list_reveal_requests(status: Optional[str] = None):
-        """Returns pending and decided reveal requests."""
+        """Returns pending and decided reveal requests, syncing from Head Office."""
+        hq_ip = os.getenv("HQ_IP") or "172.17.1.76"
+        try:
+            import httpx
+            with httpx.Client(timeout=1.5) as client:
+                resp = client.get(f"http://{hq_ip}:8000/api/reveal-requests")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    local_reqs = {r["id"]: r for r in _guard.pseudonym_mgr.list_reveal_requests()}
+                    for hr in data.get("reveal_requests", []):
+                        r_id = hr.get("request_id")
+                        if r_id and r_id not in local_reqs:
+                            _guard.pseudonym_mgr.create_reveal_request(
+                                pseudonym=hr.get("pseudonym", ""),
+                                reason=hr.get("reason", "Requested by Head Office"),
+                                req_id=r_id,
+                            )
+        except Exception:
+            pass
+
         reqs = _guard.pseudonym_mgr.list_reveal_requests(status=status)
         return {"count": len(reqs), "requests": reqs}
 
@@ -152,20 +171,48 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         """
         Approves a reveal request locally.
         Resolves the pseudonym from local reveal.db and returns the real identifier.
+        Informs Head Office that the request was approved (without egressing the real value).
         """
         reason = body.decision_reason if body else "Approved by shop operator"
         res = _guard.pseudonym_mgr.decide_reveal_request(req_id=req_id, approved=True, reason=reason)
         if not res:
             raise HTTPException(status_code=404, detail=f"Reveal request '{req_id}' not found")
+
+        # Notify Head Office
+        hq_ip = os.getenv("HQ_IP") or "172.17.1.76"
+        try:
+            import httpx
+            with httpx.Client(timeout=2.0) as client:
+                client.post(
+                    f"http://{hq_ip}:8000/api/reveal-requests/{req_id}/decision",
+                    json={"status": "approved", "decision_reason": reason},
+                )
+        except Exception:
+            pass
         return res
 
     @api.post("/api/reveal-requests/{req_id}/reject")
     def reject_reveal_request(req_id: str, body: Optional[DecisionRequest] = None):
-        """Rejects a reveal request locally."""
+        """
+        Rejects a reveal request locally.
+        Informs Head Office of the rejection.
+        """
         reason = body.decision_reason if body else "Rejected by shop operator"
         res = _guard.pseudonym_mgr.decide_reveal_request(req_id=req_id, approved=False, reason=reason)
         if not res:
             raise HTTPException(status_code=404, detail=f"Reveal request '{req_id}' not found")
+
+        # Notify Head Office
+        hq_ip = os.getenv("HQ_IP") or "172.17.1.76"
+        try:
+            import httpx
+            with httpx.Client(timeout=2.0) as client:
+                client.post(
+                    f"http://{hq_ip}:8000/api/reveal-requests/{req_id}/decision",
+                    json={"status": "rejected", "decision_reason": reason},
+                )
+        except Exception:
+            pass
         return res
 
     @api.get("/api/reveal/{pseudonym}")
