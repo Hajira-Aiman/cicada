@@ -13,25 +13,8 @@ export const GuardInspector: React.FC = () => {
 
   if (!inspectorOpen || !selectedGuardId) return null;
 
-  const guard = guards[selectedGuardId] || {
-    guard_id: selectedGuardId,
-    tenant_id: 'acme',
-    source: 'host-7f3a1234',
-    region: 'in',
-    state: 'Excellent',
-    reasons: ['Optimal performance'],
-    since: new Date().toISOString(),
-    last_seen: new Date().toISOString(),
-    guard_version: '0.3.1',
-    guard_cpu_pct: 12.0,
-    guard_mem_mb: 48.0,
-    buffer_depth: 0,
-    config_ok: true,
-    canaries_planted: 420,
-    secrets_redacted: 2,
-    flaps_prevented: 3,
-    policy_hash: '9f104be2',
-  };
+  const guard = guards[selectedGuardId];
+  if (!guard) return null;
 
   const guardReceipts = receipts.filter((r) => r.guard_id === selectedGuardId).slice(0, 5);
 

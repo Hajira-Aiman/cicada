@@ -36,11 +36,7 @@ export const Fallback2D: React.FC<{ height?: number | string }> = ({ height = '1
     return () => clearInterval(interval);
   }, []);
 
-  const guardList = [
-    guards['guard-acme-01'] || { guard_id: 'guard-acme-01', tenant_id: 'acme', state: 'Excellent' },
-    guards['guard-globex-01'] || { guard_id: 'guard-globex-01', tenant_id: 'globex', state: 'Good' },
-    guards['guard-contoso-01'] || { guard_id: 'guard-contoso-01', tenant_id: 'contoso', state: 'Fair' },
-  ];
+  const guardList = Object.values(guards);
 
   const handleNodeClick = (gId: string) => {
     setSelectedGuardId(gId);

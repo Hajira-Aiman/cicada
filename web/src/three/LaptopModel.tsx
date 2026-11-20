@@ -59,15 +59,7 @@ export function LaptopModel({ position = [0, 0, 0], rotation = [0, 0, 0], risk =
 }
 
 export interface Machine { id: string; risk: number; connected: boolean; baseColor: string }
-// ponytail: static demo values; wire risk/connected from GET /api/health when the live bridge is hooked up
-export const DEMO_FLEET: Machine[] = [
-  { id: 'shop-a', risk: 0.2, connected: true, baseColor: '#3b82f6' },
-  { id: 'shop-b', risk: 0.2, connected: true, baseColor: '#10b981' },
-  { id: 'organizer', risk: 0.2, connected: true, baseColor: '#a855f7' },
-  { id: 'head-office', risk: 0.2, connected: true, baseColor: '#06b6d4' },
-];
-
-export function LaptopViewer({ machines = DEMO_FLEET }: { machines?: Machine[] }) {
+export function LaptopViewer({ machines }: { machines: Machine[] }) {
   const gap = 11;
   return (
     <Canvas camera={{ position: [0, 5, 26], fov: 50 }} style={{ background: '#111827' }}>

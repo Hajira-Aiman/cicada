@@ -33,6 +33,7 @@ from hq.db import (
     get_action_intent,
     get_tenant_assigned_region,
     get_damage_map,
+    get_leak_badge_count,
     list_action_intents,
     get_tenant_baselines,
     get_tenant_counters,
@@ -236,9 +237,30 @@ def get_health_history(limit: int = Query(100, ge=1, le=5000), user: Dict[str, A
 
 
 @app.get("/api/payloads")
-def get_payloads(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = query_tenant_data(user, "payloads", select_cols="payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, received_at", order_by="seq DESC")
+def get_payloads(limit: int = Query(300, ge=1, le=2000), user: Dict[str, Any] = Depends(get_current_user)):
+    """Newest first. `sha256` is the receipt hash head office stored for the payload."""
+    rows = query_tenant_data(
+        user, "payloads LEFT JOIN receipts USING (payload_id)",
+        select_cols="payloads.payload_id, payloads.guard_id, payloads.tenant_id, payloads.seq, payloads.prev_hash, payloads.sent_at, "
+                    "payloads.window_start, payloads.window_end, payloads.received_at, receipts.sha256, receipts.status AS receipt_status",
+        order_by="payloads.seq DESC", limit=limit)
     return {"payloads": rows}
+
+
+@app.get("/api/guards")
+def get_guards(user: Dict[str, Any] = Depends(get_current_user)):
+    """Each guard's self-reported health (from its newest stored payload) plus per-tenant leak counts."""
+    rows = query_tenant_data(
+        user, "payloads", select_cols="guard_id, tenant_id, seq, raw_payload, received_at",
+        where="seq = (SELECT MAX(p2.seq) FROM payloads p2 WHERE p2.guard_id = payloads.guard_id)")
+    guards = []
+    for r in rows:
+        raw = r["raw_payload"]
+        raw = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        guards.append({"guard_id": r["guard_id"], "tenant_id": r["tenant_id"], "seq": r["seq"],
+                       "last_payload_at": str(r["received_at"]), "policy_version": raw.get("policy_version"),
+                       **(raw.get("health") or {})})
+    return {"guards": guards, "leaks": {t: get_leak_badge_count(t) for t in {g["tenant_id"] for g in guards}}}
 
 
 @app.get("/api/incidents")

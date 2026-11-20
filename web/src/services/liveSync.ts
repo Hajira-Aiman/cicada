@@ -15,11 +15,13 @@ export const resetSync = () => { lastMetricTime = null; seenPayloads.clear(); };
 
 export async function syncOnce() {
   const store = useLiveStore.getState();
-  const [tenants, health, recon, incs, alerts, metrics, payloads, acts] = await Promise.all([
+  const [tenants, health, recon, incs, alerts, metrics, payloads, acts, gd] = await Promise.all([
     api.getTenants(), api.getHealth(), api.getReconciliation(), api.getIncidents(), api.getAlerts(),
     apiFetch<{ metrics: any[] }>(`/api/metrics${lastMetricTime ? `?since=${encodeURIComponent(lastMetricTime)}` : ''}`),
     api.getPayloads(), apiFetch<{ intents: any[] }>('/api/actions?limit=20').catch(() => ({ intents: [] as any[] })),
+    apiFetch<{ guards: any[]; leaks: Record<string, number> }>('/api/guards').catch(() => ({ guards: [] as any[], leaks: {} as Record<string, number> })),
   ]);
+  const reported: Record<string, any> = Object.fromEntries(gd.guards.map((g) => [g.guard_id, g]));
   const region: Record<string, 'in' | 'eu'> = {};
   tenants.tenants.forEach((t) => (region[t.tenant_id] = t.assigned_region as 'in' | 'eu'));
 
@@ -49,16 +51,17 @@ export async function syncOnce() {
     const rows = health.health.filter((h) => h.tenant_id === r.tenant_id);
     const worst = rows.reduce((w, h) => Math.max(w, RANK[h.state] ?? 0), 0);
     const bad = rows.filter((h) => (RANK[h.state] ?? 0) === worst);
-    const cpu = (next[`${r.tenant_id}:cpu_pct`] || []).slice(-1)[0];
+    const rep = reported[r.guard_id] || {};   // the guard's own health, as sent in its newest payload
     guards[r.guard_id] = {
       guard_id: r.guard_id, tenant_id: r.tenant_id, region: region[r.tenant_id] || 'in',
       source: (rows.find((h) => h.source.startsWith('host-')) || rows[0])?.source || '—',
       state: rows.length ? cap(Object.keys(RANK).find((k) => RANK[k] === worst)!) : 'Good',
       reasons: [...new Set(bad.flatMap((h) => (worst > 1 ? h.reasons : [])))],
       since: bad[0]?.since || r.last_seen, last_seen: r.last_seen,
-      guard_version: '—', guard_cpu_pct: cpu ? Math.round(cpu.avg) : 0, guard_mem_mb: 0, buffer_depth: Math.max(0, r.sent_count - r.received_count),
-      config_ok: true, canaries_planted: 0, secrets_redacted: 0,
-      flaps_prevented: rows.reduce((n, h) => n + (h.flaps_prevented || 0), 0), policy_hash: '—',
+      guard_version: rep.guard_version ?? '—', guard_cpu_pct: rep.guard_cpu_pct ?? 0, guard_mem_mb: rep.guard_mem_mb ?? 0,
+      buffer_depth: rep.buffer_depth ?? Math.max(0, r.sent_count - r.received_count),
+      config_ok: rep.config_ok ?? true, canaries_planted: rep.canaries_planted ?? 0, secrets_redacted: rep.secrets_redacted ?? 0,
+      flaps_prevented: rows.reduce((n, h) => n + (h.flaps_prevented || 0), 0), policy_hash: rep.policy_version ? String(rep.policy_version).replace('sha256:', '').slice(0, 12) : '—',
     };
   }
 
@@ -68,9 +71,10 @@ export async function syncOnce() {
     severity: a.severity, body: a.body, created_at: a.created_at, status: a.status || 'open' }));
 
   // ---- receipts from payloads, latency sample from the newest metric
-  const receipts = payloads.payloads.slice(0, 100).map((p) => ({ guard_id: p.guard_id, payload_id: p.payload_id, seq: p.seq, status: 'stored' as const,
-    sha256: p.prev_hash, event_time: p.sent_at, received_at: p.received_at }));
-  const newest = payloads.payloads[0];
+  const byNewest = [...payloads.payloads].sort((a, b) => +new Date(b.received_at) - +new Date(a.received_at));
+  const receipts = byNewest.slice(0, 100).map((p) => ({ guard_id: p.guard_id, payload_id: p.payload_id, seq: p.seq,
+    status: (p.receipt_status || 'stored') as 'stored' | 'duplicate', sha256: p.sha256, event_time: p.sent_at, received_at: p.received_at }));
+  const newest = byNewest[0];
   const fresh_ = newest && !seenPayloads.has(newest.payload_id);
   if (newest) seenPayloads.add(newest.payload_id);
 
@@ -84,7 +88,10 @@ export async function syncOnce() {
       state: ({ dry_run_done: 'dry_run', done: 'executed' } as any)[a.status] || a.status, result: a.details?.why || a.details?.impact,
       requested_by: 'aiops', approved_by: a.approved_by || undefined, at: a.created_at, rollback_window_s: 120 })),
     reconciliation: Object.fromEntries(recon.reconciliation.map((r) => [r.guard_id, r])),
-    counters: { ...s.counters, raw_alerts: sum('raw_alerts'), incidents: sum('incidents'), flaps_prevented: sum('flaps_prevented') },
+    counters: { ...s.counters, raw_alerts: sum('raw_alerts'), incidents: sum('incidents'), flaps_prevented: sum('flaps_prevented'),
+      canaries_planted: Object.values(guards).reduce((n, g) => n + g.canaries_planted, 0),
+      leaks_detected: Object.values(gd.leaks).reduce((n, v) => n + v, 0),
+      duplicates_blocked: recon.reconciliation.reduce((n, r) => n + (r.duplicate_count || 0), 0) },
     latencySamples: fresh_ && newest ? [{ event_time: newest.sent_at, render_time: new Date().toISOString(),
       latency_ms: Math.max(0, Date.now() - new Date(newest.sent_at).getTime()) }, ...s.latencySamples].slice(0, 50) : s.latencySamples,
   }));
@@ -92,9 +99,8 @@ export async function syncOnce() {
 
 export function useLiveSync() {
   const token = useUiStore((s) => s.authToken);
-  const mode = useLiveStore((s) => s.mode);
   useEffect(() => {
-    if (!token || mode !== 'LIVE') return;
+    if (!token) return;
     resetSync();
     useLiveStore.getState().clearForLive();
     let stop = false;
@@ -104,5 +110,5 @@ export function useLiveSync() {
     tick();
     const id = setInterval(() => !stop && tick(), 2000);
     return () => { stop = true; clearInterval(id); };
-  }, [token, mode]);
+  }, [token]);
 }

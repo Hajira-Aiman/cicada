@@ -11,10 +11,10 @@ import { Fallback2D } from '@/three/Fallback2D';
 import { DamageMap } from '@/components/DamageMap';
 import { GuardInfo, Incident } from '@/types';
 
-const bandOf = (d: { baseline?: number; spread?: number }[], dflt: [number, number]): [number, number] => {
+const bandOf = (d: { baseline?: number; spread?: number }[]): [number, number] | undefined => {
   const p = d[d.length - 1];
   const r1 = (x: number) => Math.round(x * 10) / 10;
-  return p?.baseline !== undefined && p.spread !== undefined ? [Math.max(0, r1(p.baseline - p.spread)), r1(p.baseline + p.spread)] : dflt;
+  return p?.baseline !== undefined && p.spread !== undefined ? [Math.max(0, r1(p.baseline - p.spread)), r1(p.baseline + p.spread)] : undefined;
 };
 
 export const OverviewTab: React.FC = () => {
@@ -102,28 +102,28 @@ export const OverviewTab: React.FC = () => {
           title="CPU USAGE"
           unit="%"
           data={cpuData}
-          normalRange={bandOf(cpuData, [15, 35])}
+          normalRange={bandOf(cpuData)}
           color="#38BDF8"
         />
         <MetricChart
           title="LATENCY"
           unit="ms"
           data={latencyData}
-          normalRange={bandOf(latencyData, [30, 60])}
+          normalRange={bandOf(latencyData)}
           color="#10B981"
         />
         <MetricChart
           title="NET OUTBOUND"
           unit="kbps"
           data={netData}
-          normalRange={bandOf(netData, [20, 80])}
+          normalRange={bandOf(netData)}
           color="#A855F7"
         />
         <MetricChart
           title="MEMORY USAGE"
           unit="%"
           data={memData}
-          normalRange={bandOf(memData, [45, 60])}
+          normalRange={bandOf(memData)}
           color="#06B6D4"
         />
       </div>

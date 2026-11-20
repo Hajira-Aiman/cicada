@@ -1,7 +1,6 @@
 import React from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { TopNav } from '../../features/TopNav';
-import { SimulatedBanner } from '../../features/SimulatedBanner';
 import { CopilotDrawer } from '../../features/CopilotDrawer';
 import { GuardInspector } from '../../features/GuardInspector';
 import { OverviewTab } from './pages/OverviewTab';
@@ -23,7 +22,6 @@ export const HqApp: React.FC = () => {
   return (
     <div className="flex h-screen flex-col bg-[#0B0E14] text-[#D1D5DB] overflow-hidden font-sans">
       <TopNav />
-      <SimulatedBanner />
       <main className="flex-1 overflow-auto relative">
         <Routes>
           <Route path="/overview" element={<OverviewTab />} />

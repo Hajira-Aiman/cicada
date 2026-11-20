@@ -10,14 +10,9 @@ const WS_BASE_URL = import.meta.env.VITE_HQ_WS_URL || (
 export function useLiveSocket() {
   const apply = useLiveStore((s) => s.apply);
   const setConnected = useLiveStore((s) => s.setConnected);
-  const mode = useLiveStore((s) => s.mode);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    if (mode === 'SIMULATED') {
-      return;
-    }
-
     let retryTimeout: any = null;
     let retryDelay = 1000;
     let isMounted = true;
@@ -81,5 +76,5 @@ export function useLiveSocket() {
         wsRef.current.close();
       }
     };
-  }, [apply, setConnected, mode]);
+  }, [apply, setConnected]);
 }

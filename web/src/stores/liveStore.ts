@@ -14,7 +14,6 @@ import {
 
 interface LiveState {
   connected: boolean;
-  mode: 'LIVE' | 'SIMULATED';
   guards: Record<string, GuardInfo>;
   metrics: Record<string, MetricDataPoint[]>; // key: "guard_id:metric_name" or "tenant_id:metric_name"
   incidents: Incident[];
@@ -27,78 +26,15 @@ interface LiveState {
   latencySamples: { event_time: string; render_time: string; latency_ms: number }[];
 
   setConnected: (connected: boolean) => void;
-  setMode: (mode: 'LIVE' | 'SIMULATED') => void;
   apply: (event: any) => void;
   addAlert: (alert: Alert) => void;
   addIncident: (incident: Incident) => void;
   updateActionState: (actionId: string, newState: ActionRecord['state'], approvedBy?: string) => void;
-  resetToSimulated: (sampleData: any) => void;
   clearForLive: () => void;
 }
 
-const INITIAL_GUARDS: Record<string, GuardInfo> = {
-  'guard-acme-01': {
-    guard_id: 'guard-acme-01',
-    tenant_id: 'acme',
-    source: 'host-7f3a1234',
-    region: 'in',
-    state: 'Excellent',
-    reasons: ['All 12 metrics within baseline'],
-    since: new Date(Date.now() - 3600000).toISOString(),
-    last_seen: new Date().toISOString(),
-    guard_version: '0.3.1',
-    guard_cpu_pct: 14.2,
-    guard_mem_mb: 46.5,
-    buffer_depth: 0,
-    config_ok: true,
-    canaries_planted: 420,
-    secrets_redacted: 1,
-    flaps_prevented: 3,
-    policy_hash: '9f104be2',
-  },
-  'guard-globex-01': {
-    guard_id: 'guard-globex-01',
-    tenant_id: 'globex',
-    source: 'host-9c2e0011',
-    region: 'eu',
-    state: 'Good',
-    reasons: ['Slight net_out variance'],
-    since: new Date(Date.now() - 1800000).toISOString(),
-    last_seen: new Date().toISOString(),
-    guard_version: '0.3.1',
-    guard_cpu_pct: 18.0,
-    guard_mem_mb: 52.1,
-    buffer_depth: 0,
-    config_ok: true,
-    canaries_planted: 510,
-    secrets_redacted: 0,
-    flaps_prevented: 1,
-    policy_hash: '7c3a9f10',
-  },
-  'guard-contoso-01': {
-    guard_id: 'guard-contoso-01',
-    tenant_id: 'contoso',
-    source: 'host-1a2b3c4d',
-    region: 'in',
-    state: 'Fair',
-    reasons: ['CPU elevated > 70% in last 2 windows'],
-    since: new Date(Date.now() - 600000).toISOString(),
-    last_seen: new Date().toISOString(),
-    guard_version: '0.3.1',
-    guard_cpu_pct: 74.5,
-    guard_mem_mb: 68.3,
-    buffer_depth: 0,
-    config_ok: true,
-    canaries_planted: 310,
-    secrets_redacted: 0,
-    flaps_prevented: 8,
-    policy_hash: '3a1b2c4d',
-  },
-};
-
 export const useLiveStore = create<LiveState>((set, get) => ({
   connected: false,
-  mode: 'LIVE',
   guards: {},
   metrics: {},
   incidents: [],
@@ -114,7 +50,6 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   clearForLive: () => set({ guards: {}, metrics: {}, incidents: [], alerts: [], receipts: [], checkpoints: {}, reconciliation: {},
     counters: { raw_alerts: 0, incidents: 0, flaps_prevented: 0, canaries_planted: 0, leaks_detected: 0, duplicates_blocked: 0 }, latencySamples: [] }),
   setConnected: (connected) => set({ connected }),
-  setMode: (mode) => set(mode === 'SIMULATED' ? { mode, guards: INITIAL_GUARDS } : { mode }),
 
   apply: (event: any) => {
     if (!event) return;
@@ -135,8 +70,8 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       case 'metrics_batch':
       case 'metrics': {
         const metricsList = payload?.metrics || [];
-        const source = payload?.source || payload?.guard_id || 'host-7f3a1234';
-        const tId = tenant_id || payload?.tenant_id || 'acme';
+        const source = payload?.source || payload?.guard_id || '';
+        const tId = tenant_id || payload?.tenant_id || '';
 
         set((s) => {
           const updated = { ...s.metrics };
@@ -188,12 +123,12 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       case 'incident_upsert': {
         const incData: Incident = {
           incident_id: payload?.incident_id || `inc-${Date.now()}`,
-          tenant_id: tenant_id || payload?.tenant_id || 'acme',
-          title: payload?.body?.title || payload?.title || 'System Anomaly',
+          tenant_id: tenant_id || payload?.tenant_id || '',
+          title: payload?.body?.title || payload?.title || 'Incident',
           severity: payload?.body?.severity || payload?.severity || 'medium',
-          confidence: payload?.body?.confidence ?? payload?.confidence ?? 0.8,
+          confidence: payload?.body?.confidence ?? payload?.confidence ?? 0,
           started_at: payload?.body?.started_at || payload?.started_at || nowIso,
-          affected: payload?.body?.affected || payload?.affected || ['host-7f3a1234'],
+          affected: payload?.body?.affected || payload?.affected || [],
           signals: payload?.body?.signals || payload?.signals || [],
           reasoning_path: payload?.body?.reasoning_path || payload?.reasoning_path || [],
           counterfactual: payload?.body?.counterfactual ?? payload?.counterfactual ?? null,
@@ -221,9 +156,9 @@ export const useLiveStore = create<LiveState>((set, get) => ({
       case 'alert_opened': {
         const alert: Alert = {
           alert_id: payload?.alert_id || `alt-${Date.now()}`,
-          tenant_id: tenant_id || payload?.tenant_id || 'acme',
-          source: payload?.source || 'host-7f3a1234',
-          title: payload?.title || 'Threshold Exceeded',
+          tenant_id: tenant_id || payload?.tenant_id || '',
+          source: payload?.source || '',
+          title: payload?.title || 'Alert',
           severity: payload?.severity || 'medium',
           body: payload?.body || '',
           created_at: payload?.created_at || nowIso,
@@ -235,7 +170,7 @@ export const useLiveStore = create<LiveState>((set, get) => ({
 
       case 'payload_receipt': {
         const receipt: PayloadReceiptEvent = {
-          guard_id: payload?.guard_id || 'guard-acme-01',
+          guard_id: payload?.guard_id || '',
           payload_id: payload?.payload_id || `pay-${Date.now()}`,
           seq: payload?.seq || 0,
           status: payload?.status || 'stored',
@@ -314,19 +249,4 @@ export const useLiveStore = create<LiveState>((set, get) => ({
           : a
       ),
     })),
-  resetToSimulated: (sampleData) => {
-    set({
-      mode: 'SIMULATED',
-      incidents: sampleData?.incidents || [],
-      alerts: sampleData?.alerts || [],
-      counters: {
-        raw_alerts: 54,
-        incidents: 4,
-        flaps_prevented: 15,
-        canaries_planted: 1240,
-        leaks_detected: 0,
-        duplicates_blocked: 5,
-      },
-    });
-  },
 }));

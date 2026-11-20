@@ -21,22 +21,21 @@ export const LiveMapTab: React.FC = () => {
             3D LIVE FLEET BRIDGE (HERO VIEW)
           </h2>
           <p className="text-slate-400 text-[11px] mt-0.5">
-            4 Real Machines · Translucent Trust Gate at x = -1 · Real-time cryptographic receipts flow right → left
+            Real machines from the backend · Translucent Trust Gate at x = -1 · Real-time cryptographic receipts flow right → left
           </p>
         </div>
         <div className="flex items-center space-x-2">
           <span className="px-2 py-1 rounded bg-purple-500/20 text-purple-300 border border-purple-500/40 font-bold text-[11px]">
             CAMERA: OVERVIEW
           </span>
-          <span className="px-2 py-1 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-bold text-[11px]">
-            60 FPS SYNCHRONIZED
-          </span>
         </div>
       </div>
 
       <div className="flex-1 w-full rounded-xl overflow-hidden border border-white/10">
         <React.Suspense fallback={<Fallback2D height="100%" />}>
-          <LaptopViewer machines={machines.length ? machines : undefined} />
+          {machines.length ? <LaptopViewer machines={machines} /> : (
+            <div className="h-full flex items-center justify-center bg-[#111827] text-xs font-mono text-slate-500">NO GUARDS REPORTING YET</div>
+          )}
         </React.Suspense>
       </div>
     </div>
