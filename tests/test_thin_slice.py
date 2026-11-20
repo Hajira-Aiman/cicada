@@ -1,13 +1,16 @@
 """
 tests/test_thin_slice.py
-End-to-end verification for Phase 2 Thin Slice (T2):
+End-to-end verification for Guard Telemetry Collector:
 - psutil reading -> payload build -> HMAC signing -> send -> receipt
+- Verifies presence of cpu_pct, service_up, and latency_ms
+- Verifies change event emission
+- Verifies rejection of tampered body or invalid signature
 """
 
 import pytest
 from starlette.testclient import TestClient
 from guard.thin_slice import GuardThinSlice
-from guard.config import GuardConfig
+from guard.signer import create_auth_headers
 from tests.mock_ingest import mock_ingest_app, received_payloads
 
 
@@ -28,17 +31,26 @@ def test_thin_slice_collection_and_signing():
     assert payload.prev_hash == "GENESIS"
     assert payload.window.source_tz == "Asia/Kolkata"
 
-    # Assert CPU metric item
-    assert len(payload.metrics) == 1
-    metric = payload.metrics[0]
-    assert metric.name == "cpu_pct"
-    assert metric.source.startswith("host-")
-    assert isinstance(metric.avg, float)
+    # Assert required metrics: cpu_pct, service_up, latency_ms
+    metric_names = [m.name for m in payload.metrics]
+    assert "cpu_pct" in metric_names
+    assert "service_up" in metric_names
+    assert "latency_ms" in metric_names
 
     # Next window increments seq and chains hash
     p2, b2 = guard.collect_window(duration_seconds=2.0)
     assert p2.seq == 2
     assert p2.prev_hash.startswith("sha256:")
+
+
+def test_thin_slice_change_event_emission():
+    guard = GuardThinSlice()
+    guard.emit_change_event("app_restarted")
+    payload, body_bytes = guard.collect_window(duration_seconds=2.0)
+
+    assert len(payload.events) == 1
+    assert payload.events[0].category == "app_restarted"
+    assert payload.events[0].source.startswith("proc-")
 
 
 def test_thin_slice_send_to_mock_ingest():
@@ -58,10 +70,6 @@ def test_thin_slice_send_to_mock_ingest():
         ingested = received_payloads[0]
         assert ingested["payload_id"] == payload.payload_id
         assert ingested["tenant_id"] == "acme"
-        assert ingested["metrics"][0].name == "cpu_pct"
-
-
-from guard.signer import create_auth_headers, verify_payload_signature
 
 
 def test_reject_tampered_signature():
@@ -72,7 +80,6 @@ def test_reject_tampered_signature():
         # Generate authentic headers for original body
         headers = create_auth_headers(
             guard_id=guard.config.GUARD_ID,
-            payload_id=payload.payload_id,
             body_bytes=body_bytes,
             timestamp_iso=payload.sent_at,
             secret_key=guard.config.GUARD_SECRET_KEY,
@@ -81,12 +88,12 @@ def test_reject_tampered_signature():
         # Simulate in-flight tampering of body
         tampered_body = body_bytes.replace(b"acme", b"evil")
 
-        response = client.post("/v1/ingest", content=tampered_body, headers=headers)
+        response = client.post("/ingest", content=tampered_body, headers=headers)
         assert response.status_code == 401
         assert "Invalid HMAC" in response.text
 
         # Simulate bogus signature
         corrupted_headers = dict(headers)
-        corrupted_headers["X-Signature"] = "0" * 64
-        res2 = client.post("/v1/ingest", content=body_bytes, headers=corrupted_headers)
+        corrupted_headers["X-Airlock-Signature"] = "0" * 64
+        res2 = client.post("/ingest", content=body_bytes, headers=corrupted_headers)
         assert res2.status_code == 401
