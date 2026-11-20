@@ -27,3 +27,20 @@ def test_pseudonym_get_or_create_keeps_first_created_at():
     first = m.get_all_reveals()[0]["created_at"]
     assert m.get_or_create("src", "1.2.3.4") == ps
     assert m.get_all_reveals()[0]["created_at"] == first
+
+
+def test_tailer_resumes_after_restart_instead_of_replaying(tmp_path):
+    p = tmp_path / "shop.log"
+    p.write_bytes(b"old1\nold2\n")
+    assert LogTailer(log_path=str(p)).read_new_lines() == ["old1", "old2"]        # first ever run reads history once
+    p.write_bytes(b"old1\nold2\nnew\n")
+    assert LogTailer(log_path=str(p)).read_new_lines() == ["new"]                  # restart: only what is new
+
+
+def test_tailer_skips_history_when_guard_ran_before_but_has_no_saved_position(tmp_path):
+    p = tmp_path / "shop.log"
+    p.write_bytes(b"old\n")
+    t = LogTailer(log_path=str(p), start_at_end=True)
+    assert t.read_new_lines() == []
+    p.write_bytes(b"old\nnew\n")
+    assert t.read_new_lines() == ["new"]

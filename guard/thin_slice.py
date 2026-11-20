@@ -99,7 +99,7 @@ class GuardThinSlice:
             host_pseudonym=self.host_pseudonym,
         )
         shop_log_path = getattr(self.config, "SHOP_LOG_PATH", "data/shop-api.log")
-        self.log_tailer = LogTailer(log_path=shop_log_path, guard=self)
+        self.log_tailer = LogTailer(log_path=shop_log_path, guard=self, start_at_end=last_seq > 0)
         self.policy_gate = PolicyGate(scrubber=self.scrubber)
         self.last_checkpoint_time: float = 0.0
         self.last_checkpoint: Optional[Checkpoint] = None
