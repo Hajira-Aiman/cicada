@@ -15,6 +15,7 @@ import uuid
 import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 import psutil
@@ -108,6 +109,23 @@ class GuardThinSlice:
         self.last_net_bytes_recv = net.bytes_recv
         self.last_net_bytes_sent = net.bytes_sent
         self.last_net_time = time.perf_counter()
+
+        # head office's clock minus ours, learned from ingest's Date header; applied to every timestamp we send
+        self.clock_offset_s: float = 0.0
+
+    def now_utc(self) -> datetime:
+        return datetime.now(timezone.utc) + timedelta(seconds=self.clock_offset_s)
+
+    def learn_clock_offset(self, date_header: Optional[str]) -> None:
+        """Ingest rejects timestamps >300 s off and alerts at >30 s. A laptop with a wrong clock would be flagged on every
+        payload, so follow head office's clock. Date has 1 s resolution: ignore anything under 3 s."""
+        if not date_header:
+            return
+        try:
+            diff = (parsedate_to_datetime(date_header) - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            return
+        self.clock_offset_s = round(diff) if abs(diff) >= 3 else 0.0
 
     def emit_change_event(
         self,
@@ -323,7 +341,7 @@ class GuardThinSlice:
         - service_up (1.0 if healthy, 0.0 if down)
         - latency_ms (HTTP probe duration)
         """
-        now = datetime.now(timezone.utc)
+        now = self.now_utc()
         start_time = now - timedelta(seconds=duration_seconds)
         end_time = now
 
@@ -513,12 +531,12 @@ class GuardThinSlice:
             headers = create_auth_headers(
                 guard_id=self.config.GUARD_ID,
                 body_bytes=body_bytes,
-                timestamp_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                timestamp_iso=self.now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 secret_key=self.config.GUARD_SECRET_KEY,
             )
             should_close = False
             if client_obj is None:
-                client_obj = httpx.Client(timeout=self.config.TIMEOUT_SECONDS)
+                client_obj = httpx.Client(timeout=self.config.TIMEOUT_SECONDS, verify=self.config.TLS_VERIFY)
                 should_close = True
             try:
                 resp = client_obj.post(
@@ -526,6 +544,7 @@ class GuardThinSlice:
                     content=body_bytes,
                     headers=headers,
                 )
+                self.learn_clock_offset(resp.headers.get("date"))
                 resp.raise_for_status()
                 data = resp.json()
                 return IngestReceipt.model_validate(data)
@@ -607,7 +626,7 @@ def run_loop(
 
     # Reusable probe client avoids ~350ms per-window TCP/TLS handshake overhead
     probe_client = httpx.Client(timeout=1.0)
-    ingest_client = httpx.Client(timeout=guard.config.TIMEOUT_SECONDS)
+    ingest_client = httpx.Client(timeout=guard.config.TIMEOUT_SECONDS, verify=guard.config.TLS_VERIFY)
 
     iteration = 0
     try:

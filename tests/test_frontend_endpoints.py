@@ -26,7 +26,7 @@ async def test_polled_endpoints_answer_and_need_login():
         assert (await c.get("/api/events?limit=5", headers=h)).json() == {"events": []}
         assert (await c.get("/api/health/history", headers=h)).json() == {"history": []}
         assert (await c.get("/api/actions", headers=h)).json() == {"intents": []}
-        assert set((await c.get("/api/damage-map/acme")).json()) == {"nodes", "edges"}
+        assert set((await c.get("/api/damage-map/acme", headers=h)).json()) == {"nodes", "edges"}
 
 
 @pytest.mark.anyio

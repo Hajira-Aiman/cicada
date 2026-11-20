@@ -9,8 +9,17 @@ import json
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from contracts.request_auth import guard_request_headers
 from hq.api.main import app
 from hq.db import init_all_databases, register_guard, truncate_all_data, get_action_audit_logs
+
+
+async def _admin(client):
+    r = await client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    client.headers["Authorization"] = f"Bearer {r.json()['token']}"
+
+
+GUARD_SECRET = "sec-acme-super-secret-key-2026"
 
 
 @pytest.fixture(autouse=True)
@@ -25,6 +34,7 @@ def setup_db():
 @pytest.mark.anyio
 async def test_action_propose_and_policy_checks():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _admin(client)
         # 1. Successful proposal
         res = await client.post(
             "/api/actions/propose",
@@ -94,6 +104,7 @@ async def test_action_propose_and_policy_checks():
 @pytest.mark.anyio
 async def test_action_dry_run_and_approval_workflow():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _admin(client)
         # Propose an intent
         prop_res = await client.post(
             "/api/actions/propose",
@@ -143,6 +154,7 @@ async def test_action_dry_run_and_approval_workflow():
 @pytest.mark.anyio
 async def test_guard_pull_signed_intent_and_result_rollback():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await _admin(client)
         # Propose, dry run, and approve
         prop = await client.post(
             "/api/actions/propose",
@@ -158,7 +170,7 @@ async def test_guard_pull_signed_intent_and_result_rollback():
         await client.post(f"/api/actions/{intent_id}/approve", json={"approved_by": "Bob SRE"})
 
         # Guard pulls pending signed intents
-        pull_res = await client.get("/api/actions/pending?guard_id=guard-acme-01")
+        pull_res = await client.get("/api/actions/pending", headers=guard_request_headers("guard-acme-01", GUARD_SECRET, "GET", "/api/actions/pending"))
         assert pull_res.status_code == 200
         intents = pull_res.json()["intents"]
         assert len(intents) >= 1
@@ -180,14 +192,11 @@ async def test_guard_pull_signed_intent_and_result_rollback():
         assert target_intent["signature"] == expected_sig
 
         # Case A: Guard reports execution with health_improved=False -> triggers automated rollback
+        result_body = json.dumps({"guard_id": "guard-acme-01", "status": "done", "health_improved": False, "elapsed_seconds": 130}).encode()
         res_fail = await client.post(
             f"/api/actions/{intent_id}/result",
-            json={
-                "guard_id": "guard-acme-01",
-                "status": "done",
-                "health_improved": False,
-                "elapsed_seconds": 130,
-            },
+            content=result_body,
+            headers={"Content-Type": "application/json", **guard_request_headers("guard-acme-01", GUARD_SECRET, "POST", f"/api/actions/{intent_id}/result", result_body)},
         )
         assert res_fail.status_code == 200
         assert res_fail.json()["status"] == "rolled_back"

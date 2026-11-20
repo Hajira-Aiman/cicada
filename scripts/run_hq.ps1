@@ -8,9 +8,12 @@ function Start-Svc($name, $arguments, $extraEnv = @{}) {
     Start-Process -FilePath $py -ArgumentList $arguments -WindowStyle Minimized -RedirectStandardOutput "logs\$name.out.log" -RedirectStandardError "logs\$name.err.log"
     foreach ($k in $extraEnv.Keys) { Remove-Item "env:$k" }
 }
-# --host 0.0.0.0 so the shop laptop can reach them over the hotspot
-Start-Svc "ingest-in" "-m uvicorn hq.ingest.main:app --host 0.0.0.0 --port 8001" @{ REGION = "in" }
-Start-Svc "ingest-eu" "-m uvicorn hq.ingest.main:app --host 0.0.0.0 --port 8002" @{ REGION = "eu" }
+# --host 0.0.0.0 so the shop laptop can reach them over the hotspot.
+# Guard -> ingest is encrypted when certs\hq.crt + certs\hq.key exist (python scripts\make_cert.py); copy hq.crt to the shop laptop's certs\ folder.
+$tls = if ((Test-Path "certs\hq.crt") -and (Test-Path "certs\hq.key")) { "--ssl-keyfile certs\hq.key --ssl-certfile certs\hq.crt" } else { "" }
+Write-Host ("Ingest transport: " + $(if ($tls) { "HTTPS (certs\hq.crt)" } else { "plain HTTP (run python scripts\make_cert.py to encrypt)" }))
+Start-Svc "ingest-in" "-m uvicorn hq.ingest.main:app --host 0.0.0.0 --port 8001 $tls" @{ REGION = "in" }
+Start-Svc "ingest-eu" "-m uvicorn hq.ingest.main:app --host 0.0.0.0 --port 8002 $tls" @{ REGION = "eu" }
 Start-Svc "worker" "-m hq.aiops.worker" @{ DB_USER = "aiops_worker"; DB_PASSWORD = "aiops_secret_2026" }
 Start-Svc "ai" "-m uvicorn hq.ai.service:app --port 8010"
 Start-Svc "api" "-m uvicorn hq.api.main:app --host 0.0.0.0 --port 8000"

@@ -12,6 +12,15 @@ This runbook covers the exact instructions for deploying the Airlock Head Office
 
 ---
 
+## 1b. Guard connection security (what the scripts do for you)
+
+- **Encrypted + pinned (guard -> ingest):** `python scripts/make_cert.py` writes `certs/hq.crt` (public, committed so the shop gets it with `git pull`) and `certs/hq.key` (private, git-ignored). `run_hq.ps1` serves ingest over HTTPS when both exist; `run_shop.ps1` switches the guard to HTTPS and trusts only `certs/hq.crt` (`INGEST_CA_CERT`). Regenerating the cert means committing the new `hq.crt` and restarting both laptops' scripts.
+- **Signed guard requests:** every guard call to head office other than an ingest payload (reveal pull/decision, action pull/result) carries `X-Airlock-Guard-ID/-Timestamp/-Signature` (HMAC of timestamp, method, path+query, body; see `contracts/request_auth.py`). Anonymous callers get 401, and a guard only ever sees or changes its own tenant.
+- **Logins required** to propose/dry-run/approve actions, send feedback, and read baselines, counters and the damage map.
+- **Clock skew:** the guard follows head office's clock (learned from ingest's `Date` header), so a laptop with a wrong clock no longer trips the skew alert.
+- **CORS** allows localhost and private networks only (hotspot/LAN), not the whole internet.
+- **Tests never touch live Postgres:** `tests/conftest.py` selects SQLite; `truncate_all_data` refuses to run on Postgres unless `AIRLOCK_ALLOW_TRUNCATE=1`.
+
 ## 2. HTTPS & Certificate Setup with `mkcert`
 
 ### Step 2.1: Generate Local CA & Host Certificates on LOQ Laptop

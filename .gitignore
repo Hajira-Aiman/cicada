@@ -36,3 +36,6 @@ build/
 # Reference directory (cloned reference repos are read-only)
 *.pem
 node_modules/
+
+# TLS private keys (certs/hq.crt is public and may be shared)
+certs/*.key

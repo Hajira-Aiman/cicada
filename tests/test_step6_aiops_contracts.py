@@ -96,11 +96,16 @@ def test_broadcaster_throttles_incident_updated():
     asyncio.run(_run_test())
 
 
+def _admin(client):
+    r = client.post("/api/login", json={"username": "admin", "password": "admin123"})
+    return {"Authorization": f"Bearer {r.json()['token']}"}
+
+
 def test_feedback_with_explicit_and_extracted_metric_source(client):
     """Verify feedback stores metric and source, falling back to aiops_alerts.body.signals."""
     # 1. Explicit metric & source
     res1 = client.post(
-        "/api/feedback",
+        "/api/feedback", headers=_admin(client),
         json={
             "alert_id": "alt-test-explicit-1",
             "tenant_id": "acme",
@@ -143,7 +148,7 @@ def test_feedback_with_explicit_and_extracted_metric_source(client):
     )
 
     res2 = client.post(
-        "/api/feedback",
+        "/api/feedback", headers=_admin(client),
         json={
             "alert_id": alert_id,
             "tenant_id": "acme",
@@ -171,7 +176,7 @@ def test_feedback_with_explicit_and_extracted_metric_source(client):
 def test_tenant_baselines_api(client):
     """Verify GET /api/baselines/{tenant_id} returns empty list when none exist, and returns normal bands when present."""
     # 1. Empty baselines for non-existent tenant
-    res_empty = client.get("/api/baselines/nonexistent_tenant")
+    res_empty = client.get("/api/baselines/nonexistent_tenant", headers=_admin(client))
     assert res_empty.status_code == 200
     assert res_empty.json() == []
 
@@ -200,7 +205,7 @@ def test_tenant_baselines_api(client):
             tenant_id="acme",
         )
 
-    res_acme = client.get("/api/baselines/acme")
+    res_acme = client.get("/api/baselines/acme", headers=_admin(client))
     assert res_acme.status_code == 200
     data = res_acme.json()
     assert isinstance(data, list)

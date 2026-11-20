@@ -193,7 +193,8 @@ async def test_tenant_counters_endpoint():
             flaps_prevented=3,
         )
 
-        res = await client.get("/api/counters/acme")
+        login = await client.post("/api/login", json={"username": "admin", "password": "admin123"})
+        res = await client.get("/api/counters/acme", headers={"Authorization": f"Bearer {login.json()['token']}"})
         assert res.status_code == 200
         d = res.json()
         assert d["tenant_id"] == "acme"

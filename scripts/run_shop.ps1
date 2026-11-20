@@ -3,7 +3,11 @@
 param([Parameter(Mandatory = $true)][string]$HqIp)
 $py = if (Test-Path "airlock\.venv\Scripts\python.exe") { "airlock\.venv\Scripts\python.exe" } elseif (Test-Path ".venv\Scripts\python.exe") { ".venv\Scripts\python.exe" } else { "python" }
 New-Item -ItemType Directory -Force logs, data | Out-Null
-$env:INGEST_URL = "http://${HqIp}:8001/ingest"   # the guard sends here (India region)
+# With certs\hq.crt present (copied from head office) the guard talks HTTPS and trusts only that certificate.
+$scheme = "http"
+if (Test-Path "certs\hq.crt") { $scheme = "https"; $env:INGEST_CA_CERT = (Resolve-Path "certs\hq.crt").Path }
+Write-Host "Guard -> ingest transport: $scheme"
+$env:INGEST_URL = "${scheme}://${HqIp}:8001/ingest"   # the guard sends here (India region)
 $env:HQ_URL = "http://${HqIp}:8000"              # the guard pulls reveal requests from here
 $env:TENANT_ID = "acme"; $env:GUARD_ID = "guard-acme-01"
 function Start-Svc($name, $arguments) {

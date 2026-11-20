@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from contracts.request_auth import PRIVATE_ORIGIN_REGEX, guard_request_headers
 from guard.config import GuardConfig
 from guard.thin_slice import GuardThinSlice
 
@@ -48,7 +49,7 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
 
     api.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origin_regex=PRIVATE_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -140,13 +141,23 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
 
     hq = os.getenv("HQ_URL", "http://localhost:8000")
 
+    def hq_call(method, path, params=None, json_body=None):
+        """Every guard -> head-office call is signed with this guard's secret (see contracts/request_auth.py)."""
+        import httpx
+        url = httpx.URL(f"{hq}{path}", params=params)
+        body = json.dumps(json_body).encode() if json_body is not None else b""
+        headers = guard_request_headers(_guard.config.GUARD_ID, _guard.config.GUARD_SECRET_KEY, method, url.raw_path.decode(), body)
+        headers["Content-Type"] = "application/json"
+        res = httpx.request(method, url, content=body, headers=headers, timeout=3, verify=_guard.config.TLS_VERIFY)
+        res.raise_for_status()
+        return res
+
     def pull_reveals():
         """Head office never reaches into the shop: the guard asks for pending reveal requests for its own tenant."""
         import time
-        import httpx
         while True:
             try:
-                rows = httpx.get(f"{hq}/reveal-requests", params={"status": "pending"}, timeout=3).json().get("reveal_requests", [])
+                rows = hq_call("GET", "/reveal-requests", params={"status": "pending"}).json().get("reveal_requests", [])
                 known = {r["id"] for r in _guard.pseudonym_mgr.list_reveal_requests()}
                 for r in rows:
                     if r.get("tenant_id") == _guard.config.TENANT_ID and r["request_id"] not in known:
@@ -158,8 +169,7 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
     def push_decision(req_id, status, reason):
         """Only the decision goes back to head office, never the revealed value."""
         try:
-            import httpx
-            httpx.post(f"{hq}/reveal-requests/{req_id}/decision", json={"status": status, "decision_reason": reason}, timeout=3)
+            hq_call("POST", f"/reveal-requests/{req_id}/decision", json_body={"status": status, "decision_reason": reason})
         except Exception:
             pass
 

@@ -1684,7 +1684,14 @@ def get_action_audit_logs(intent_id: Optional[str] = None, limit: int = 100) -> 
 
 
 def truncate_all_data():
-    """Truncates/clears all dynamic test data to ensure test independence."""
+    """Truncates/clears all dynamic test data to ensure test independence.
+
+    On Postgres this wipes live telemetry, so it only runs when AIRLOCK_ALLOW_TRUNCATE=1 (point it at a scratch database).
+    Without Postgres credentials the tests use the SQLite fallback and need nothing.
+    """
+    if is_postgres_available() and os.getenv("AIRLOCK_ALLOW_TRUNCATE") != "1":
+        raise RuntimeError("Refusing to truncate PostgreSQL (it holds live telemetry). Test on SQLite (AIRLOCK_USE_SQLITE=true, "
+                           "the default under pytest) or set AIRLOCK_ALLOW_TRUNCATE=1 for a scratch database.")
     regional_tables = [
         "payloads",
         "metrics",

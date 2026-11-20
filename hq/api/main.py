@@ -16,11 +16,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from contracts.request_auth import PRIVATE_ORIGIN_REGEX, request_signature
 from hq.api.broadcaster import broadcaster
+from hq.ingest.service import parse_iso8601_z
 from hq.db import (
     authenticate_user,
     compare_guard_checkpoint,
@@ -58,7 +60,7 @@ app = FastAPI(title="Airlock Head-Office API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=PRIVATE_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -86,6 +88,34 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
     if not payload:
         raise HTTPException(status_code=401, detail="Invalid or expired session token")
     return payload
+
+
+async def get_guard_or_user(request: Request, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """A guard proving itself with a signed request (role 'guard'), or a logged-in user. Anything else is a 401."""
+    guard_id = request.headers.get("x-airlock-guard-id")
+    if not guard_id:
+        return await get_current_user(authorization)
+    guard = lookup_guard(guard_id)
+    ts = request.headers.get("x-airlock-timestamp", "")
+    sig = request.headers.get("x-airlock-signature", "")
+    ok = False
+    if guard and sig:
+        try:
+            fresh = abs((datetime.now(timezone.utc) - parse_iso8601_z(ts)).total_seconds()) <= 300
+        except ValueError:
+            fresh = False
+        raw_path = request.scope.get("raw_path") or request.url.path.encode()
+        path_qs = raw_path.decode() + (f"?{request.url.query}" if request.url.query else "")
+        expected = request_signature(guard["hmac_secret"], ts, request.method, path_qs, await request.body())
+        ok = fresh and hmac.compare_digest(expected, sig)
+    if not ok:
+        log_audit_event(actor=guard_id, action="bad_guard_request_signature", details={"path": request.url.path})
+        raise HTTPException(status_code=401, detail="Invalid guard signature")
+    return {"role": "guard", "user_id": guard_id, "guard_id": guard_id, "tenant_id": guard["tenant_id"]}
+
+
+def own_tenant_only(user: Dict[str, Any]) -> bool:
+    return user.get("role") in ("customer", "guard")
 
 
 def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = "*", order_by: str = "", where: str = "", params: tuple = (), limit: int = 0) -> List[Dict[str, Any]]:
@@ -360,7 +390,7 @@ def get_checkpoint_for_guard(guard_id: str, up_to_seq: Optional[int] = None, use
 
 
 @app.post("/api/checkpoints/compare")
-def compare_checkpoint(req: CompareCheckpointRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+def compare_checkpoint(req: CompareCheckpointRequest, user: Dict[str, Any] = Depends(get_current_user)):
     return compare_guard_checkpoint(
         guard_id=req.guard_id,
         up_to_seq=req.up_to_seq,
@@ -383,11 +413,11 @@ class DecisionRevealRequest(BaseModel):
 
 @app.post("/reveal-requests")
 @app.post("/api/reveal-requests")
-def post_reveal_request(req: CreateRevealRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
-    if user and user.get("role") == "customer":
+def post_reveal_request(req: CreateRevealRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    tenant_id = req.tenant_id or user.get("tenant_id") or "acme"
+    if user.get("role") == "customer":
         tenant_id = user.get("tenant_id") or tenant_id  # a customer cannot file requests against another tenant
-    requested_by = (user.get("user_id") if user else "analyst") or "analyst"
+    requested_by = user.get("user_id") or "analyst"
     return create_reveal_request(
         tenant_id=tenant_id,
         pseudonym=req.pseudonym,
@@ -399,15 +429,17 @@ def post_reveal_request(req: CreateRevealRequest, user: Optional[Dict[str, Any]]
 
 @app.get("/reveal-requests")
 @app.get("/api/reveal-requests")
-def get_reveal_requests(status: Optional[str] = None, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    tenant_id = user.get("tenant_id") if (user and user.get("role") == "customer") else None
+def get_reveal_requests(status: Optional[str] = None, user: Dict[str, Any] = Depends(get_guard_or_user)):
+    tenant_id = user.get("tenant_id") if own_tenant_only(user) else None
     return {"reveal_requests": list_reveal_requests(tenant_id=tenant_id, status=status)}
 
 
 @app.post("/reveal-requests/{request_id}/decision")
 @app.post("/api/reveal-requests/{request_id}/decision")
-def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    decided_by = user.get("user_id", "shop-manager") if user else "shop-manager"
+def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Dict[str, Any] = Depends(get_guard_or_user)):
+    if own_tenant_only(user) and not any(r["request_id"] == request_id for r in list_reveal_requests(tenant_id=user.get("tenant_id"))):
+        raise HTTPException(status_code=404, detail="Reveal request not found")
+    decided_by = user.get("user_id") or "shop-manager"
     updated = update_reveal_request_status(
         request_id=request_id,
         status=req.status,
@@ -450,9 +482,11 @@ class ActionResultRequest(BaseModel):
 @app.post("/api/actions/propose")
 def propose_action(
     req: ProposeActionRequest,
-    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
-    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
+    tenant_id = req.tenant_id or user.get("tenant_id") or "acme"
+    if user.get("role") == "customer":
+        tenant_id = user.get("tenant_id") or tenant_id
 
     # Head-office policy check 1: allowed action
     if req.action not in ALLOWED_ACTIONS:
@@ -493,13 +527,13 @@ def propose_action(
 @app.post("/api/actions/{intent_id}/dry-run")
 def dry_run_action(
     intent_id: str,
-    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
     intent = get_action_intent(intent_id)
-    if not intent:
+    if not intent or (own_tenant_only(user) and intent["tenant_id"] != user.get("tenant_id")):
         raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
 
-    actor = (user.get("user_id") if user else "operator") or "operator"
+    actor = user.get("user_id") or "operator"
     updated = update_action_intent_status(intent_id=intent_id, status="dry_run_done")
     simulation = {
         "action": intent["action"],
@@ -520,13 +554,13 @@ def dry_run_action(
 def approve_action(
     intent_id: str,
     req: ApproveActionRequest,
-    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
     if not req.approved_by or not req.approved_by.strip():
         raise HTTPException(status_code=400, detail="Approval requires the person's name (approved_by)")
 
     intent = get_action_intent(intent_id)
-    if not intent:
+    if not intent or (own_tenant_only(user) and intent["tenant_id"] != user.get("tenant_id")):
         raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
 
     if intent["status"] != "dry_run_done":
@@ -566,44 +600,26 @@ def list_actions(limit: int = 50, user: Dict[str, Any] = Depends(get_current_use
 
 
 @app.get("/api/actions/pending")
-def get_pending_actions(
-    guard_id: Optional[str] = None,
-    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
-):
-    tenant_id = None
-    secret = "airlock-head-office-session-secret-2026"
-    if guard_id:
-        guard = lookup_guard(guard_id)
-        if guard:
-            tenant_id = guard["tenant_id"]
-            secret = guard["hmac_secret"]
-    elif user and user.get("role") == "customer":
-        tenant_id = user.get("tenant_id")
+def get_pending_actions(user: Dict[str, Any] = Depends(get_guard_or_user)):
+    """A guard (identified by its signature, never by a query parameter) gets its tenant's approved intents, each signed
+    with that guard's secret. Users see the same list unsigned."""
+    guard = lookup_guard(user["guard_id"]) if user["role"] == "guard" else None
+    tenant_id = user.get("tenant_id") if own_tenant_only(user) else None
 
-    intents = list_pending_action_intents(tenant_id=tenant_id)
     signed_intents = []
-    for it in intents:
+    for it in list_pending_action_intents(tenant_id=tenant_id):
         created_at_str = it["created_at"].isoformat() if hasattr(it["created_at"], "isoformat") else str(it["created_at"])
         signed_item = dict(it)
         signed_item["created_at"] = created_at_str
-
-        # Generate HMAC-SHA256 signature matching guard ingest scheme
-        body_to_sign = json.dumps(
-            {
-                "intent_id": it["intent_id"],
-                "tenant_id": it["tenant_id"],
-                "action": it["action"],
-                "target": it["target"],
-                "created_at": created_at_str,
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-        sig = hmac.new(secret.encode("utf-8"), body_to_sign, hashlib.sha256).hexdigest()
-        signed_item["signature"] = sig
+        signed_item["signature"] = None
+        if guard:
+            body_to_sign = json.dumps(
+                {"intent_id": it["intent_id"], "tenant_id": it["tenant_id"], "action": it["action"], "target": it["target"], "created_at": created_at_str},
+                sort_keys=True,
+            ).encode("utf-8")
+            signed_item["signature"] = hmac.new(guard["hmac_secret"].encode("utf-8"), body_to_sign, hashlib.sha256).hexdigest()
+            log_action_audit(intent_id=it["intent_id"], actor=user["guard_id"], step="pulled_by_guard")
         signed_intents.append(signed_item)
-        if guard_id:
-            log_action_audit(intent_id=it["intent_id"], actor=guard_id, step="pulled_by_guard")
-
     return {"intents": signed_intents}
 
 
@@ -611,10 +627,15 @@ def get_pending_actions(
 def post_action_result(
     intent_id: str,
     req: ActionResultRequest,
+    user: Dict[str, Any] = Depends(get_guard_or_user),
 ):
+    if user.get("role") == "customer":
+        raise HTTPException(status_code=403, detail="Only a guard reports execution results")
     intent = get_action_intent(intent_id)
-    if not intent:
+    if not intent or (user["role"] == "guard" and intent["tenant_id"] != user.get("tenant_id")):
         raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
+    if user["role"] == "guard":
+        req.guard_id = user["guard_id"]   # identity comes from the signature, not the body
 
     # If health did not improve or elapsed > 120s, trigger rollback
     if not req.health_improved or req.elapsed_seconds > 120:
@@ -654,8 +675,12 @@ def post_action_result(
 @app.get("/api/actions/audit")
 def get_action_audit(
     intent_id: Optional[str] = None,
-    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
+    if user.get("role") == "customer":
+        intent = get_action_intent(intent_id) if intent_id else None
+        if not intent or intent["tenant_id"] != user.get("tenant_id"):
+            raise HTTPException(status_code=403, detail="Customers may read the audit trail of their own tenant's intents only")
     return {"audit_log": get_action_audit_logs(intent_id=intent_id)}
 
 
@@ -669,9 +694,9 @@ class FeedbackRequest(BaseModel):
 
 @app.post("/feedback")
 @app.post("/api/feedback")
-def post_feedback(req: FeedbackRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    user_id = req.user_id or (user.get("user_id") if user else "user-ops-1") or "user-ops-1"
-    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
+def post_feedback(req: FeedbackRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = req.user_id or user.get("user_id") or "user-ops-1"
+    tenant_id = (user.get("tenant_id") if user.get("role") == "customer" else None) or req.tenant_id or user.get("tenant_id") or "acme"
     return record_feedback(
         alert_id=req.alert_id,
         tenant_id=tenant_id,
@@ -684,16 +709,16 @@ def post_feedback(req: FeedbackRequest, user: Optional[Dict[str, Any]] = Depends
 @app.get("/api/baselines/{tenant_id}")
 def get_baselines_endpoint(
     tenant_id: str,
-    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+    user: Dict[str, Any] = Depends(get_current_user),
 ):
-    if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+    if user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=403, detail="Access denied to tenant baselines")
     return get_tenant_baselines(tenant_id)
 
 
 @app.get("/api/damage-map/{tenant_id}")
-def get_damage_map_endpoint(tenant_id: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+def get_damage_map_endpoint(tenant_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    if user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=403, detail="Access denied to tenant damage map")
     return get_damage_map(tenant_id)
 
@@ -746,8 +771,8 @@ async def post_ai_chat(req: ChatRequest, user: Dict[str, Any] = Depends(get_curr
 
 
 @app.get("/api/counters/{tenant_id}")
-def get_counters_endpoint(tenant_id: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+def get_counters_endpoint(tenant_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    if user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=403, detail="Access denied to tenant counters")
     return get_tenant_counters(tenant_id)
 
