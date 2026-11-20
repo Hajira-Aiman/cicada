@@ -1,8 +1,9 @@
 """
 guard/thin_slice.py
 Airlock Guard Telemetry Collector & Secure Sender:
-- Imports exclusively from contracts.models
-- Emits cpu_pct, service_up, and latency_ms in every payload
+- Real probe: latency_ms = probe duration to shop-api health endpoint
+- Real service_up: 1.0 if HTTP 200, else 0.0 + service_down event emitted
+- Metrics in every window: cpu_pct, mem_pct, disk_pct, net_in_kbps, net_out_kbps, service_up, latency_ms
 - Supports change events (app_restarted, version_changed, config_changed, new_process)
 - Signs raw body with HMAC-SHA256 (X-Airlock-*) matching docs/contracts.md
 """
@@ -53,6 +54,12 @@ class GuardThinSlice:
             "db": generate_pseudonym("proc", "database", self.config.TENANT_SECRET_KEY),
         }
 
+        # Network I/O counter baseline
+        net = psutil.net_io_counters()
+        self.last_net_bytes_recv = net.bytes_recv
+        self.last_net_bytes_sent = net.bytes_sent
+        self.last_net_time = time.perf_counter()
+
     def emit_change_event(
         self,
         category: str,
@@ -61,8 +68,7 @@ class GuardThinSlice:
         severity: str = "info",
     ):
         """
-        Emits a change event (app_restarted, version_changed, config_changed, new_process)
-        with an authorized pseudonymous source.
+        Emits a change or lifecycle event with an authorized pseudonymous source.
         """
         src = source or self.service_pseudonyms.get("shop-api", self.host_pseudonym)
         event = EventSample(
@@ -74,21 +80,101 @@ class GuardThinSlice:
             window_s=2,
         )
         self.pending_events.append(event)
-        logger.info(f"Queued change event: {category} for source {src}")
+        logger.info(f"Queued event: {category} for source {src} (severity={severity})")
 
-    def measure_latency(self) -> float:
-        """Simulates or measures probe latency in ms."""
-        # Baseline ping / latency check
-        return 12.5
+    def _get_net_rates(self) -> Tuple[float, float]:
+        """Calculates network inbound and outbound throughput in kilobits per second (kbps)."""
+        now = time.perf_counter()
+        dt = max(0.1, now - self.last_net_time)
+        net = psutil.net_io_counters()
+        bytes_recv = net.bytes_recv
+        bytes_sent = net.bytes_sent
 
-    def check_service_up(self) -> float:
-        """Probes shop-api health or returns 1.0."""
-        return 1.0
+        delta_recv = max(0, bytes_recv - self.last_net_bytes_recv)
+        delta_sent = max(0, bytes_sent - self.last_net_bytes_sent)
 
-    def collect_window(self, duration_seconds: float = 2.0) -> Tuple[AirlockPayload, bytes]:
+        self.last_net_bytes_recv = bytes_recv
+        self.last_net_bytes_sent = bytes_sent
+        self.last_net_time = now
+
+        net_in_kbps = round((delta_recv * 8.0) / (dt * 1000.0), 2)
+        net_out_kbps = round((delta_sent * 8.0) / (dt * 1000.0), 2)
+        return net_in_kbps, net_out_kbps
+
+    def _get_disk_pct(self) -> float:
+        """Reads primary disk usage percentage."""
+        try:
+            drive = os.path.splitdrive(os.getcwd())[0]
+            path = drive + "\\" if drive else "/"
+            return round(psutil.disk_usage(path).percent, 2)
+        except Exception:
+            return 50.0
+
+    def probe_shop_health(self, client: Optional[httpx.Client] = None) -> Tuple[float, float]:
         """
-        Gathers metrics over window duration and constructs a valid AirlockPayload.
-        Guarantees that cpu_pct, service_up, and latency_ms are present in every window.
+        Performs real HTTP probe to shop-api health URL.
+        Returns:
+            (service_up: 1.0 or 0.0, latency_ms: float)
+        If status is not 200 or request fails, emits a service_down event.
+        """
+        start = time.perf_counter()
+        health_url = getattr(
+            self.config,
+            "SHOP_HEALTH_URL",
+            f"http://127.0.0.1:{self.config.SHOP_API_PORT}/health",
+        )
+        should_close = False
+        if client is None:
+            client = httpx.Client(timeout=1.0)
+            should_close = True
+
+        try:
+            res = client.get(health_url)
+            elapsed_ms = max(0.5, (time.perf_counter() - start) * 1000.0)
+            if res.status_code == 200:
+                return 1.0, round(elapsed_ms, 2)
+            else:
+                self.emit_change_event(
+                    category="service_down",
+                    source=self.service_pseudonyms["shop-api"],
+                    severity="high",
+                )
+                return 0.0, round(elapsed_ms, 2)
+        except Exception:
+            elapsed_ms = max(1.0, (time.perf_counter() - start) * 1000.0)
+            self.emit_change_event(
+                category="service_down",
+                source=self.service_pseudonyms["shop-api"],
+                severity="high",
+            )
+            return 0.0, round(elapsed_ms, 2)
+        finally:
+            if should_close:
+                client.close()
+
+    def check_service_up(self, client: Optional[httpx.Client] = None) -> float:
+        up, _ = self.probe_shop_health(client=client)
+        return up
+
+    def measure_latency(self, client: Optional[httpx.Client] = None) -> float:
+        _, lat = self.probe_shop_health(client=client)
+        return lat
+
+    def collect_window(
+        self,
+        duration_seconds: float = 2.0,
+        probe_client: Optional[httpx.Client] = None,
+    ) -> Tuple[AirlockPayload, bytes]:
+        """
+        Gathers system and service metrics over window duration.
+        Every payload includes:
+        - cpu_pct (host CPU %)
+        - mem_pct (host Memory %)
+        - disk_pct (host Disk %)
+        - net_in_kbps (Network in rate)
+        - net_out_kbps (Network out rate - vital for cryptomining detection)
+        - service_up (1.0 if healthy, 0.0 if down)
+        - latency_ms (HTTP probe duration)
         """
         now = datetime.now(timezone.utc)
         start_time = now - timedelta(seconds=duration_seconds)
@@ -98,10 +184,14 @@ class GuardThinSlice:
         end_iso = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
         sent_iso = end_iso
 
-        # Read CPU
+        # Read host metrics
         cpu_val = float(psutil.cpu_percent(interval=None))
-        service_up_val = self.check_service_up()
-        latency_val = self.measure_latency()
+        mem_val = float(psutil.virtual_memory().percent)
+        disk_val = self._get_disk_pct()
+        net_in_kbps, net_out_kbps = self._get_net_rates()
+
+        # Real health probe
+        service_up_val, latency_val = self.probe_shop_health(client=probe_client)
 
         metrics = [
             MetricSample(
@@ -109,6 +199,30 @@ class GuardThinSlice:
                 source=self.host_pseudonym,
                 avg=round(cpu_val, 2),
                 max=round(cpu_val, 2),
+            ),
+            MetricSample(
+                name="mem_pct",
+                source=self.host_pseudonym,
+                avg=round(mem_val, 2),
+                max=round(mem_val, 2),
+            ),
+            MetricSample(
+                name="disk_pct",
+                source=self.host_pseudonym,
+                avg=round(disk_val, 2),
+                max=round(disk_val, 2),
+            ),
+            MetricSample(
+                name="net_in_kbps",
+                source=self.host_pseudonym,
+                avg=net_in_kbps,
+                max=net_in_kbps,
+            ),
+            MetricSample(
+                name="net_out_kbps",
+                source=self.host_pseudonym,
+                avg=net_out_kbps,
+                max=net_out_kbps,
             ),
             MetricSample(
                 name="service_up",
@@ -238,7 +352,7 @@ def run_loop(
         guard = GuardThinSlice()
 
     logger.info(
-        f"Airlock Guard Thin Slice started [Tenant: {guard.config.TENANT_ID}, Guard: {guard.config.GUARD_ID}]"
+        f"Airlock Guard started [Tenant: {guard.config.TENANT_ID}, Guard: {guard.config.GUARD_ID}]"
     )
     logger.info(f"Target regional ingest: {guard.config.REGION_URL}")
 

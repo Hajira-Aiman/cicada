@@ -23,6 +23,7 @@ class GuardConfig:
     GUARD_VERSION: str = "0.2.0"
     GUARD_PORT: int = int(os.getenv("GUARD_PORT", "9000"))
     SHOP_API_PORT: int = int(os.getenv("SHOP_API_PORT", "7000"))
+    SHOP_HEALTH_URL: str = os.getenv("SHOP_HEALTH_URL", f"http://127.0.0.1:{os.getenv('SHOP_API_PORT', '7000')}/health")
     TIMEOUT_SECONDS: float = 5.0
 
 
