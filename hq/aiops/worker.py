@@ -21,10 +21,10 @@ log = logging.getLogger("aiops")
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS health_history(id bigserial PRIMARY KEY, tenant_id text, source text, state text, old_state text, reasons jsonb, at timestamptz);
 CREATE TABLE IF NOT EXISTS health_current(tenant_id text, source text, state text, reasons jsonb, since timestamptz, flaps_prevented int, updated timestamptz, PRIMARY KEY(tenant_id, source));
-CREATE TABLE IF NOT EXISTS aiops_alerts(alert_id text PRIMARY KEY, tenant_id text, kind text, severity text, title text, signals jsonb, second_opinion real, agrees boolean, started_at timestamptz, updated_at timestamptz, closed_at timestamptz);
 CREATE TABLE IF NOT EXISTS aiops_counters(tenant_id text PRIMARY KEY, raw_alerts int, incidents int, noise_cut_pct real, flaps_prevented int, updated timestamptz);
 CREATE TABLE IF NOT EXISTS tenant_thresholds(tenant_id text PRIMARY KEY, config jsonb);
 """
+iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 REPLAY_S = 300  # on start, rebuild baselines from the last 5 minutes
 
 
@@ -36,7 +36,12 @@ class Region:
         self.detector = Detector(self.engine)
         self.manager = Manager(self.engine, self.detector)
         self.db = psycopg.connect(dsn("airlock_" + name), autocommit=True)
-        self.db.execute(SCHEMA)
+        for stmt in filter(None, (x.strip() for x in SCHEMA.split(";"))):
+            try:
+                self.db.execute(stmt)
+            except psycopg.errors.InsufficientPrivilege:
+                log.warning("%s: no rights to create tables (limited role); Sahiti's init script must create them", name)
+                break
         self.cursor = datetime.fromtimestamp(time.time() - REPLAY_S, timezone.utc)
 
     def load_overrides(self):
@@ -73,12 +78,14 @@ class Region:
                             (c.tenant_id, c.source, c.state, c.old_state, json.dumps(c.reasons), c.at))
             log.info("%s %s %s -> %s %s", c.at, c.source, c.old_state, c.state, c.reasons)
         for kind, a in self.detector.step(now):
-            self.db.execute("""INSERT INTO aiops_alerts VALUES(%s,%s,%s,%s,%s,%s,%s,%s,to_timestamp(%s),to_timestamp(%s),%s)
-                               ON CONFLICT(alert_id) DO UPDATE SET kind=EXCLUDED.kind, severity=EXCLUDED.severity, title=EXCLUDED.title,
-                               signals=EXCLUDED.signals, second_opinion=EXCLUDED.second_opinion, agrees=EXCLUDED.agrees,
-                               updated_at=EXCLUDED.updated_at, closed_at=EXCLUDED.closed_at""",
-                            (a.alert_id, a.tenant_id, a.kind, a.severity, a.title, json.dumps(a.signals), a.second_opinion, a.agrees,
-                             a.started, a.last_flag, datetime.fromtimestamp(now, timezone.utc) if a.closed else None))
+            body = {"kind": a.kind, "signals": a.signals, "second_opinion": a.second_opinion, "agrees": a.agrees,
+                    "started_at": iso(a.started), "last_flag_at": iso(a.last_flag)}
+            self.db.execute("""INSERT INTO aiops_alerts(alert_id,tenant_id,source,title,severity,body,status,created_at,updated_at)
+                               VALUES(%s,%s,%s,%s,%s,%s,%s,to_timestamp(%s),now())
+                               ON CONFLICT(alert_id) DO UPDATE SET title=EXCLUDED.title, severity=EXCLUDED.severity,
+                               body=EXCLUDED.body, status=EXCLUDED.status, updated_at=now()""",
+                            (a.alert_id, a.tenant_id, a.signals[0]["source"] if a.signals else None, a.title, a.severity,
+                             json.dumps(body), "closed" if a.closed else "open", a.started))
             log.info("alert %s %s [%s/%s] river=%.2f agrees=%s", kind, a.title, a.kind, a.severity, a.second_opinion, a.agrees)
         for kind, inc in self.manager.step(now):
             c = inc.to_contract()

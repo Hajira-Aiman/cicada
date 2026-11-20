@@ -213,6 +213,16 @@ CREATE TABLE IF NOT EXISTS aiops_alerts (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS aiops_counters (
+    tenant_id VARCHAR(64) PRIMARY KEY,
+    raw_alerts INT DEFAULT 0,
+    incidents INT DEFAULT 0,
+    noise_cut_pct REAL DEFAULT 0,
+    flaps_prevented INT DEFAULT 0,
+    updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
+
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
@@ -417,6 +427,16 @@ CREATE TABLE IF NOT EXISTS aiops_alerts (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS aiops_counters (
+    tenant_id VARCHAR(64) PRIMARY KEY,
+    raw_alerts INT DEFAULT 0,
+    incidents INT DEFAULT 0,
+    noise_cut_pct REAL DEFAULT 0,
+    flaps_prevented INT DEFAULT 0,
+    updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
 
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
