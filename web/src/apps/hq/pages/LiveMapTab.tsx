@@ -15,9 +15,12 @@ export const LiveMapTab: React.FC = () => {
   const machines: Machine[] = Object.values(guards)
     .map((g) => ({
       id: g.guard_id,
+      label: g.tenant_id === 'acme' ? 'SYSTEM 1' : g.tenant_id === 'globex' ? 'SYSTEM 2' : g.tenant_id.toUpperCase(),
+      state: g.state, region: g.region,
       risk: RISK[g.state] ?? 0.2,
       baseColor: COLOR[g.tenant_id] || '#38bdf8',
       connected: Date.now() - new Date(g.last_seen).getTime() < 30000 && g.state !== 'Offline',
+      cpu: g.guard_cpu_pct, buffer: g.buffer_depth, lastSeen: g.last_seen,
     }));
 
   return (
