@@ -60,7 +60,7 @@ class GuardThinSlice:
 
         metrics = [
             MetricItem(
-                name=MetricName.CPU_PCT,
+                name="cpu_pct",
                 source=self.host_pseudonym,
                 avg=round(cpu_val, 2),
                 max=round(cpu_val, 2),
