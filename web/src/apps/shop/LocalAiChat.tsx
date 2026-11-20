@@ -50,22 +50,18 @@ export const LocalAiChat: React.FC<LocalAiChatProps> = ({
     {
       title: 'Tripwire & Secrets',
       query: 'Were any cleartext API keys or credentials caught by the tripwire?',
-      icon: '🛡️',
     },
     {
       title: 'Egress Payload',
       query: 'What data was in the last egress payload sent to Cloud Dashboard?',
-      icon: '📦',
     },
     {
       title: 'Auth & Errors',
       query: 'Summarize failed auth attempts and anomalous errors in local logs',
-      icon: '🔍',
     },
     {
       title: 'Buffer Status',
       query: 'What is the current outbox buffer depth and retention countdown?',
-      icon: '⏱️',
     },
   ];
 
@@ -212,7 +208,7 @@ export const LocalAiChat: React.FC<LocalAiChatProps> = ({
               className={`flex flex-col ${isAi ? 'items-start' : 'items-end'}`}
             >
               <div className="flex items-center space-x-2 text-[10px] text-slate-500 mb-1 px-1">
-                <span>{isAi ? '🤖 LOCAL GUARD AI' : '👤 LOCAL OPERATOR'}</span>
+                <span>{isAi ? 'LOCAL GUARD AI' : 'OPERATOR'}</span>
                 <span>·</span>
                 <span>{msg.timestamp}</span>
               </div>
@@ -272,10 +268,9 @@ export const LocalAiChat: React.FC<LocalAiChatProps> = ({
           <button
             key={idx}
             onClick={() => handleSend(chip.query)}
-            className="px-2.5 py-1 rounded bg-[#161d2d] hover:bg-[#1f283d] text-slate-300 hover:text-white border border-white/5 hover:border-lime-500/40 text-[11px] font-mono transition-all shrink-0 flex items-center space-x-1"
+            className="px-2.5 py-1 rounded bg-[#161d2d] hover:bg-[#1f283d] text-slate-300 hover:text-white border border-white/5 hover:border-lime-500/40 text-[11px] font-mono transition-all shrink-0"
           >
-            <span>{chip.icon}</span>
-            <span>{chip.title}</span>
+            {chip.title}
           </button>
         ))}
       </div>

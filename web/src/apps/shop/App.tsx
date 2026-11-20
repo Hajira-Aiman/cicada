@@ -228,21 +228,15 @@ export const ShopApp: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#07090E] text-[#D1D5DB] font-mono flex flex-col select-none">
-      {/* Sleek Top Navigation Bar */}
-      <header className="h-14 bg-[#0A0D15] border-b border-white/[0.08] px-5 flex items-center justify-between z-30">
+      {/* De-cluttered Top Header: Local Guard + Two Tabs */}
+      <header className="h-14 bg-[#0A0D15] border-b border-white/[0.08] px-5 flex items-center z-30">
         <div className="flex items-center space-x-6">
-          <div className="flex items-center space-x-3">
-            <span className="text-sm font-black tracking-widest text-white">
-              AIRLOCK
-            </span>
-            <span className="text-[11px] text-lime-400 uppercase tracking-widest font-bold hidden sm:inline px-2 py-0.5 rounded bg-lime-500/10 border border-lime-500/20">
-              LOCAL GUARD
-            </span>
-            <span className="w-2 h-2 rounded-full bg-lime-400 animate-pulse shadow-[0_0_8px_#A3E635]" />
-          </div>
+          <span className="text-sm font-black tracking-widest text-white uppercase">
+            LOCAL GUARD
+          </span>
 
           {/* Navigation Tabs */}
-          <nav className="flex space-x-1">
+          <nav className="flex space-x-2">
             <button
               onClick={() => setActiveTab('logs')}
               className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors ${
@@ -255,39 +249,15 @@ export const ShopApp: React.FC = () => {
             </button>
             <button
               onClick={() => setActiveTab('ai')}
-              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors flex items-center space-x-1.5 ${
+              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors ${
                 activeTab === 'ai'
-                  ? 'bg-lime-500/15 text-lime-300 border border-lime-500/30 shadow-[0_0_15px_rgba(163,230,53,0.15)]'
+                  ? 'bg-lime-500/15 text-lime-300 border border-lime-500/30'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
               }`}
             >
-              <span>🤖</span>
-              <span>LOCAL AI COPILOT</span>
-              <span className="w-1.5 h-1.5 rounded-full bg-lime-400"></span>
+              LOCAL AI COPILOT
             </button>
           </nav>
-        </div>
-
-        {/* Security & Boundary Badges */}
-        <div className="flex items-center space-x-3 text-xs">
-          <a
-            href="/"
-            className="px-2.5 py-1 rounded bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 border border-sky-500/30 text-xs font-bold transition-colors inline-flex items-center space-x-1"
-          >
-            <span>CLOUD DASHBOARD</span>
-            <span>↗</span>
-          </a>
-          <span className="hidden md:inline px-2.5 py-1 rounded bg-black/40 text-slate-300 border border-white/5 text-[10px]">
-            NODE: <strong className="text-white">SYSTEM 1 (EDGE)</strong>
-          </span>
-          <span className="px-2.5 py-1 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-bold text-[10px]">
-            ✓ ZERO CLOUD EXPORT OF SECRETS
-          </span>
-          {guardDown && (
-            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px]">
-              DEMO STANDBY
-            </span>
-          )}
         </div>
       </header>
 
@@ -396,7 +366,7 @@ export const ShopApp: React.FC = () => {
                             <span className="text-slate-400"><TimeText timestamp={log.timestamp} /></span>
                           </div>
                           <span className={log.has_secret ? 'text-rose-400 font-bold px-1.5 py-0.5 rounded bg-rose-500/10 border border-rose-500/20' : 'text-slate-500'}>
-                            {log.has_secret ? `⚠️ ${log.secret_type || 'TRIPWIRE SECRET'}` : log.level}
+                            {log.has_secret ? `[${log.secret_type || 'TRIPWIRE SECRET'}]` : log.level}
                           </span>
                         </div>
 
