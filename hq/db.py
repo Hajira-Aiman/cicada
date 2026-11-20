@@ -638,7 +638,8 @@ def execute_query(
         if cur.description:
             rows = [dict(r) for r in cur.fetchall()]
             if tenant_id and tenant_id != "all" and db_name in ("airlock_in", "airlock_eu"):
-                rows = [r for r in rows if r.get("tenant_id") == tenant_id]
+                # only rows that carry a tenant_id can be filtered: a query without that column is already scoped by its WHERE
+                rows = [r for r in rows if "tenant_id" not in r or r["tenant_id"] == tenant_id]
             return rows
         conn.commit()
         return []
