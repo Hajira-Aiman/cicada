@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -37,6 +38,10 @@ from hq.db import (
 
 # Global event listeners for in-memory WebSocket pub/sub
 _ingest_listeners: List[Callable[[Dict[str, Any]], Any]] = []
+
+# guard_id -> last time a clock-skew alert was raised
+_last_skew_alert: Dict[str, float] = {}
+SKEW_ALERT_EVERY_S = 300.0
 
 # Tripwire regex patterns
 CANARY_REGEX = re.compile(r"AKIACANARY[A-Z0-9]*", re.IGNORECASE)
@@ -190,13 +195,16 @@ def process_ingest_payload(
             log_audit_event(
                 actor=guard_id, action="clock_skew_warning", tenant_id=tenant_id, details={"skew_s": skew_seconds}
             )
-            record_tamper_alert(
-                tenant_id=tenant_id,
-                tamper_type="clock_skew_warning",
-                title=f"Tamper: Clock skew warning ({int(skew_seconds)}s)",
-                severity="medium",
-                details={"skew_s": skew_seconds, "guard_id": guard_id},
-            )
+            # audit row above is per payload; the visible alert is throttled (a skewed guard would otherwise raise one per payload)
+            if time.time() - _last_skew_alert.get(guard_id, 0.0) >= SKEW_ALERT_EVERY_S:
+                _last_skew_alert[guard_id] = time.time()
+                record_tamper_alert(
+                    tenant_id=tenant_id,
+                    tamper_type="clock_skew_warning",
+                    title=f"Tamper: Clock skew warning ({int(skew_seconds)}s)",
+                    severity="medium",
+                    details={"skew_s": skew_seconds, "guard_id": guard_id},
+                )
     except Exception as exc:
         log_audit_event(
             actor=guard_id, action="invalid_timestamp", tenant_id=tenant_id, details={"timestamp": timestamp_str}
