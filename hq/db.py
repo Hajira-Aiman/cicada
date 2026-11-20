@@ -1222,9 +1222,9 @@ def record_feedback(
     if metric is None or source is None:
         try:
             alert_query = (
-                "SELECT body, source FROM aiops_alerts WHERE alert_id = %s;"
+                "SELECT body, source, tenant_id FROM aiops_alerts WHERE alert_id = %s;"
                 if is_postgres_available()
-                else "SELECT body, source FROM aiops_alerts WHERE alert_id = ?;"
+                else "SELECT body, source, tenant_id FROM aiops_alerts WHERE alert_id = ?;"
             )
             alert_rows = execute_query(db_name, alert_query, (alert_id,), tenant_id=tenant_id)
             if alert_rows:
