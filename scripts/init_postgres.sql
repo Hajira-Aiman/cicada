@@ -60,6 +60,23 @@ INSERT INTO guards (guard_id, tenant_id, hmac_secret) VALUES
     ('guard-contoso-01', 'contoso', 'sec-contoso-super-secret-key-2026')
 ON CONFLICT (guard_id) DO NOTHING;
 
+-- Seed initial users with scrypt password hashes
+INSERT INTO users (user_id, tenant_id, role, password_hash) VALUES
+    ('admin', NULL, 'engineer', 'scrypt$c2FsdC1hZG1pbi0yMDI2$S2+LAEdp1XilDF4COmPPTmFtgBRYLbGJCLN/YRBBCed8W6ydmpsBA0eVPGlSOarK7HoNh10X1DK3VgiCAC0a/Q=='),
+    ('user-acme', 'acme', 'customer', 'scrypt$c2FsdC1hY21lLTIwMjY=$PcWWqwev1hDgD44VIaMpVfJMao5xJYupDGV/DHm+M0cD32h0apYSxB5bhLGpLF23LEeMQLJskw8yX+3wkTG9MQ=='),
+    ('user-globex', 'globex', 'customer', 'scrypt$c2FsdC1nbG9iZXgtMjAyNg==$517FJoycv+sWCUl7NrwXfj4Z7aYH/ublDkR7felDxpvnzX4Ae99zAMRB81H/DlYLz4b1Z3stmkDn65BCvvROMg=='),
+    ('user-contoso', 'contoso', 'customer', 'scrypt$c2FsdC1jb250b3NvLTIwMjY=$oxtispFeK2x1FKFQw6CKnGWUakmxOsO+djrmVLAIULC0ekXR2RGTjDn21+Hgcul1yXM1Jyo8kjJyLDmL425udg==')
+ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = EXCLUDED.role, tenant_id = EXCLUDED.tenant_id;
+
+-- Limited DB role for AIOps worker
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'aiops_worker') THEN
+        CREATE ROLE aiops_worker WITH LOGIN PASSWORD 'aiops_secret_2026';
+    END IF;
+END
+$$;
+
 -- Database 2: airlock_in (India Region)
 CREATE DATABASE airlock_in;
 \c airlock_in;
@@ -163,6 +180,108 @@ CREATE TABLE IF NOT EXISTS guard_reconciliation (
     last_seen TIMESTAMP WITH TIME ZONE
 );
 
+CREATE TABLE IF NOT EXISTS aiops_alerts (
+    alert_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64),
+    title VARCHAR(256),
+    severity VARCHAR(32),
+    body JSONB,
+    status VARCHAR(32) DEFAULT 'open',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Row-Level Security on tenant_id
+ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE health_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE health_current ENABLE ROW LEVEL SECURITY;
+ALTER TABLE incidents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE aiops_alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE guard_reconciliation ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE payloads FORCE ROW LEVEL SECURITY;
+ALTER TABLE metrics FORCE ROW LEVEL SECURITY;
+ALTER TABLE events FORCE ROW LEVEL SECURITY;
+ALTER TABLE health_history FORCE ROW LEVEL SECURITY;
+ALTER TABLE health_current FORCE ROW LEVEL SECURITY;
+ALTER TABLE incidents FORCE ROW LEVEL SECURITY;
+ALTER TABLE aiops_alerts FORCE ROW LEVEL SECURITY;
+ALTER TABLE guard_reconciliation FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tenant_isolation_payloads ON payloads;
+CREATE POLICY tenant_isolation_payloads ON payloads FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_metrics ON metrics;
+CREATE POLICY tenant_isolation_metrics ON metrics FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_events ON events;
+CREATE POLICY tenant_isolation_events ON events FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_health_history ON health_history;
+CREATE POLICY tenant_isolation_health_history ON health_history FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_health_current ON health_current;
+CREATE POLICY tenant_isolation_health_current ON health_current FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_incidents ON incidents;
+CREATE POLICY tenant_isolation_incidents ON incidents FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_aiops_alerts ON aiops_alerts;
+CREATE POLICY tenant_isolation_aiops_alerts ON aiops_alerts FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_guard_recon ON guard_reconciliation;
+CREATE POLICY tenant_isolation_guard_recon ON guard_reconciliation FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+-- Permissions for AIOps worker role
+GRANT CONNECT ON DATABASE airlock_in TO aiops_worker;
+GRANT USAGE ON SCHEMA public TO aiops_worker;
+GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
+GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;
+
 -- Database 3: airlock_eu (Europe Region)
 CREATE DATABASE airlock_eu;
 \c airlock_eu;
@@ -265,3 +384,105 @@ CREATE TABLE IF NOT EXISTS guard_reconciliation (
     gaps JSONB DEFAULT '[]'::jsonb,
     last_seen TIMESTAMP WITH TIME ZONE
 );
+
+CREATE TABLE IF NOT EXISTS aiops_alerts (
+    alert_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64),
+    title VARCHAR(256),
+    severity VARCHAR(32),
+    body JSONB,
+    status VARCHAR(32) DEFAULT 'open',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Row-Level Security on tenant_id
+ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE health_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE health_current ENABLE ROW LEVEL SECURITY;
+ALTER TABLE incidents ENABLE ROW LEVEL SECURITY;
+ALTER TABLE aiops_alerts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE guard_reconciliation ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE payloads FORCE ROW LEVEL SECURITY;
+ALTER TABLE metrics FORCE ROW LEVEL SECURITY;
+ALTER TABLE events FORCE ROW LEVEL SECURITY;
+ALTER TABLE health_history FORCE ROW LEVEL SECURITY;
+ALTER TABLE health_current FORCE ROW LEVEL SECURITY;
+ALTER TABLE incidents FORCE ROW LEVEL SECURITY;
+ALTER TABLE aiops_alerts FORCE ROW LEVEL SECURITY;
+ALTER TABLE guard_reconciliation FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tenant_isolation_payloads ON payloads;
+CREATE POLICY tenant_isolation_payloads ON payloads FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_metrics ON metrics;
+CREATE POLICY tenant_isolation_metrics ON metrics FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_events ON events;
+CREATE POLICY tenant_isolation_events ON events FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_health_history ON health_history;
+CREATE POLICY tenant_isolation_health_history ON health_history FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_health_current ON health_current;
+CREATE POLICY tenant_isolation_health_current ON health_current FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_incidents ON incidents;
+CREATE POLICY tenant_isolation_incidents ON incidents FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_aiops_alerts ON aiops_alerts;
+CREATE POLICY tenant_isolation_aiops_alerts ON aiops_alerts FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+DROP POLICY IF EXISTS tenant_isolation_guard_recon ON guard_reconciliation;
+CREATE POLICY tenant_isolation_guard_recon ON guard_reconciliation FOR ALL USING (
+    current_setting('app.current_tenant', true) IS NULL 
+    OR current_setting('app.current_tenant', true) = '' 
+    OR current_setting('app.current_tenant', true) = 'all' 
+    OR tenant_id = current_setting('app.current_tenant', true)
+);
+
+-- Permissions for AIOps worker role
+GRANT CONNECT ON DATABASE airlock_eu TO aiops_worker;
+GRANT USAGE ON SCHEMA public TO aiops_worker;
+GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
+GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;

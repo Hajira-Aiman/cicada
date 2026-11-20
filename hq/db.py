@@ -5,9 +5,13 @@ Supports PostgreSQL (via psycopg) for airlock_core, airlock_in, and airlock_eu,
 with transparent SQLite in-memory fallback for isolated pytest environments.
 """
 
+import base64
+import hashlib
+import hmac
+import json
 import os
 import sqlite3
-import json
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -103,6 +107,11 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 ('guard-acme-01', 'acme', 'sec-acme-super-secret-key-2026'),
                 ('guard-globex-01', 'globex', 'sec-globex-super-secret-key-2026'),
                 ('guard-contoso-01', 'contoso', 'sec-contoso-super-secret-key-2026');
+            INSERT OR IGNORE INTO users (user_id, tenant_id, role, password_hash) VALUES
+                ('admin', NULL, 'engineer', 'scrypt$c2FsdC1hZG1pbi0yMDI2$S2+LAEdp1XilDF4COmPPTmFtgBRYLbGJCLN/YRBBCed8W6ydmpsBA0eVPGlSOarK7HoNh10X1DK3VgiCAC0a/Q=='),
+                ('user-acme', 'acme', 'customer', 'scrypt$c2FsdC1hY21lLTIwMjY=$PcWWqwev1hDgD44VIaMpVfJMao5xJYupDGV/DHm+M0cD32h0apYSxB5bhLGpLF23LEeMQLJskw8yX+3wkTG9MQ=='),
+                ('user-globex', 'globex', 'customer', 'scrypt$c2FsdC1nbG9iZXgtMjAyNg==$517FJoycv+sWCUl7NrwXfj4Z7aYH/ublDkR7felDxpvnzX4Ae99zAMRB81H/DlYLz4b1Z3stmkDn65BCvvROMg=='),
+                ('user-contoso', 'contoso', 'customer', 'scrypt$c2FsdC1jb250b3NvLTIwMjY=$oxtispFeK2x1FKFQw6CKnGWUakmxOsO+djrmVLAIULC0ekXR2RGTjDn21+Hgcul1yXM1Jyo8kjJyLDmL425udg==');
         """)
     else:  # airlock_in or airlock_eu
         cur.executescript("""
@@ -194,6 +203,17 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 last_hash TEXT,
                 gaps TEXT DEFAULT '[]',
                 last_seen TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS aiops_alerts (
+                alert_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                source TEXT,
+                title TEXT,
+                severity TEXT,
+                body TEXT,
+                status TEXT DEFAULT 'open',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
         """)
     conn.commit()
@@ -403,20 +423,111 @@ def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) 
     return res
 
 
-def execute_query(db_name: str, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
-    """Executes a SELECT query and returns rows as dictionaries."""
+AUTH_SECRET = os.getenv("AUTH_SECRET", "airlock-head-office-session-secret-2026")
+
+
+def hash_password(password: str, salt: Optional[bytes] = None) -> str:
+    """Hashes a password using scrypt."""
+    salt = salt or os.urandom(16)
+    dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=16384, r=8, p=1)
+    return f"scrypt${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Verifies a password against a stored scrypt hash."""
+    try:
+        scheme, salt_b64, dk_b64 = stored_hash.split("$")
+        salt = base64.b64decode(salt_b64)
+        expected_dk = base64.b64decode(dk_b64)
+        actual_dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, n=16384, r=8, p=1)
+        return hmac.compare_digest(actual_dk, expected_dk)
+    except Exception:
+        return False
+
+
+def create_session_token(user_id: str, tenant_id: Optional[str], role: str, expires_in_s: int = 86400) -> str:
+    """Generates a cryptographically signed HMAC-SHA256 session token."""
+    now_ts = int(time.time())
+    payload = {
+        "user_id": user_id,
+        "tenant_id": tenant_id,
+        "role": role,
+        "iat": now_ts,
+        "exp": now_ts + expires_in_s,
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    b64_payload = base64.urlsafe_b64encode(raw).decode("utf-8")
+    sig = hmac.new(AUTH_SECRET.encode("utf-8"), b64_payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{b64_payload}.{sig}"
+
+
+def verify_session_token(token: str) -> Optional[Dict[str, Any]]:
+    """Verifies signature and expiration of session token. Returns payload dict if valid."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 2:
+            return None
+        b64_payload, sig = parts
+        expected_sig = hmac.new(AUTH_SECRET.encode("utf-8"), b64_payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        payload = json.loads(base64.urlsafe_b64decode(b64_payload.encode("utf-8")).decode("utf-8"))
+        if payload.get("exp", 0) < int(time.time()):
+            return None
+        return payload
+    except Exception:
+        return None
+
+
+def authenticate_user(user_id: str, password: str) -> Optional[Dict[str, Any]]:
+    """Validates user password hash and returns user dictionary with signed session token."""
+    query = (
+        "SELECT user_id, tenant_id, role, password_hash FROM users WHERE user_id = %s;"
+        if is_postgres_available()
+        else "SELECT user_id, tenant_id, role, password_hash FROM users WHERE user_id = ?;"
+    )
+    rows = execute_query("airlock_core", query, (user_id,))
+    if not rows:
+        return None
+    user = rows[0]
+    if not verify_password(password, user["password_hash"]):
+        return None
+    token = create_session_token(user["user_id"], user["tenant_id"], user["role"])
+    return {
+        "user_id": user["user_id"],
+        "tenant_id": user["tenant_id"],
+        "role": user["role"],
+        "token": token,
+    }
+
+
+def execute_query(
+    db_name: str, query: str, params: tuple = (), tenant_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Executes a query with optional tenant RLS isolation and returns rows as dictionaries."""
     if is_postgres_available():
         with psycopg.connect(
             host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name, row_factory=dict_row
         ) as conn:
             with conn.cursor() as cur:
+                if tenant_id and db_name in ("airlock_in", "airlock_eu"):
+                    cur.execute("SELECT set_config('app.current_tenant', %s, true);", (tenant_id,))
                 cur.execute(query, params)
-                return [dict(r) for r in cur.fetchall()]
+                if cur.description:
+                    return [dict(r) for r in cur.fetchall()]
+                conn.commit()
+                return []
     else:
         conn = get_sqlite_conn(db_name)
         cur = conn.cursor()
         cur.execute(query, params)
-        return [dict(r) for r in cur.fetchall()]
+        if cur.description:
+            rows = [dict(r) for r in cur.fetchall()]
+            if tenant_id and tenant_id != "all" and db_name in ("airlock_in", "airlock_eu"):
+                rows = [r for r in rows if r.get("tenant_id") == tenant_id]
+            return rows
+        conn.commit()
+        return []
 
 
 def log_audit_event(
