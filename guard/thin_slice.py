@@ -35,6 +35,7 @@ from guard.ledger import GuardLedger
 from guard.outbox import GuardOutbox
 from guard.raw_store import RawStore
 from guard.scrubber import Scrubber
+from guard.detectors import AuthDetector, PowerDetector, ChangeDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("airlock-guard")
@@ -81,6 +82,17 @@ class GuardThinSlice:
             "checkout": self.pseudonym_mgr.get_or_create("proc", "checkout"),
             "db": self.pseudonym_mgr.get_or_create("proc", "database"),
         }
+
+        # Local AIOps Detectors (T9, T13, T19)
+        self.auth_detector = AuthDetector(
+            pseudonym_mgr=self.pseudonym_mgr,
+            tenant_tz_str=self.config.TIMEZONE,
+        )
+        self.power_detector = PowerDetector(host_pseudonym=self.host_pseudonym)
+        self.change_detector = ChangeDetector(
+            pseudonym_mgr=self.pseudonym_mgr,
+            host_pseudonym=self.host_pseudonym,
+        )
 
         # Network I/O counter baseline
         net = psutil.net_io_counters()
@@ -129,6 +141,37 @@ class GuardThinSlice:
                 severity="medium",
             )
         return scrubbed_line, count
+
+    def record_login(
+        self,
+        raw_username: str,
+        raw_ip: str,
+        success: bool,
+        timestamp: Optional[float] = None,
+    ) -> List[EventSample]:
+        """
+        Records a login attempt and enqueues triggered security events (honeypot, odd_hour, login_after_failures).
+        """
+        events = self.auth_detector.record_login(
+            raw_username=raw_username,
+            raw_ip=raw_ip,
+            success=success,
+            service_pseudonym=self.service_pseudonyms["shop-api"],
+            timestamp=timestamp,
+        )
+        self.pending_events.extend(events)
+        return events
+
+    def notify_shop_process(self, pid: int, create_time: float) -> Optional[EventSample]:
+        """Notifies guard of shop-api process identity to detect app_restarted events."""
+        event = self.change_detector.update_shop_process(
+            pid=pid,
+            create_time=create_time,
+            service_pseudonym=self.service_pseudonyms["shop-api"],
+        )
+        if event:
+            self.pending_events.append(event)
+        return event
 
     def _get_net_rates(self) -> Tuple[float, float]:
         """Calculates network inbound and outbound throughput in kilobits per second (kbps)."""
@@ -288,6 +331,20 @@ class GuardThinSlice:
                     max=latency_val,
                 )
             )
+
+        # Evaluate power & battery state (T19)
+        power_metrics, power_events = self.power_detector.check_power()
+        metrics.extend(power_metrics)
+        self.pending_events.extend(power_events)
+
+        # Evaluate auth bursts (30+ failures in 60s) (T9)
+        burst_events = self.auth_detector.evaluate_bursts(service_pseudonym=self.service_pseudonyms["shop-api"])
+        self.pending_events.extend(burst_events)
+
+        # Evaluate configuration changes (.env hash) (T13)
+        cfg_event = self.change_detector.check_config_changed()
+        if cfg_event:
+            self.pending_events.append(cfg_event)
 
         # Plant canary every 30s into raw store (T5)
         self.scrubber.maybe_plant_canary(raw_store=self.raw_store)
