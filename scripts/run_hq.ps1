@@ -19,5 +19,5 @@ Start-Svc "sim" "-m tools.simulate_timeline --tenants globex contoso"
 Push-Location web
 Start-Process -FilePath "npx.cmd" -ArgumentList "vite --host 0.0.0.0 --port 5173" -WindowStyle Minimized -RedirectStandardOutput "..\logs\web.out.log" -RedirectStandardError "..\logs\web.err.log"
 Pop-Location
-$ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^(127|169)' } | Select-Object -First 1).IPAddress
-Write-Host "Head office up. This laptop's IP: $ip   UI: http://${ip}:5173   (logs in .\logs)"
+Write-Host "Head office up (logs in .\logs). This laptop's addresses (use the one on the hotspot Wi-Fi, usually 192.168.x.x / 172.x / 10.x, NOT 127.* or 100.*):"
+Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notmatch '^(127|169)' } | ForEach-Object { Write-Host ("  {0}  ({1})  ->  UI http://{0}:5173" -f $_.IPAddress, $_.InterfaceAlias) }
