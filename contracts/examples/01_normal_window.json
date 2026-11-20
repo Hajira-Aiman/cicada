@@ -1,0 +1,53 @@
+{
+  "schema": "airlock.v1",
+  "payload_id": "0193f2c1-7b5e-7c3a-9f10-4be2a1d0c9e1",
+  "tenant_id": "acme",
+  "guard_id": "guard-acme-01",
+  "seq": 1,
+  "prev_hash": "GENESIS",
+  "policy_version": "sha256:ab12cd34ef56",
+  "sent_at": "2026-11-21T04:12:08Z",
+  "window": {
+    "start": "2026-11-21T04:12:04Z",
+    "end": "2026-11-21T04:12:06Z",
+    "source_tz": "Asia/Kolkata"
+  },
+  "metrics": [
+    {
+      "name": "cpu_pct",
+      "source": "host-7f3a1234",
+      "avg": 24.5,
+      "max": 38.0
+    },
+    {
+      "name": "mem_pct",
+      "source": "host-7f3a1234",
+      "avg": 42.1,
+      "max": 42.8
+    },
+    {
+      "name": "service_up",
+      "source": "host-7f3a1234",
+      "avg": 1.0,
+      "max": 1.0
+    }
+  ],
+  "events": [],
+  "log_patterns": [
+    {
+      "pattern_id": "tpl-1001",
+      "level": "INFO",
+      "count": 14,
+      "is_new": false
+    }
+  ],
+  "health": {
+    "guard_version": "0.3.1",
+    "guard_cpu_pct": 1.1,
+    "guard_mem_mb": 64.0,
+    "buffer_depth": 0,
+    "config_ok": true,
+    "canaries_planted": 4,
+    "secrets_redacted": 0
+  }
+}

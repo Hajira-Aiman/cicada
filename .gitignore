@@ -13,3 +13,19 @@ yarn-debug.log*
 yarn-error.log*
 temp/
 tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.env
+
+# Airlock Local Data & SQLite
+data/*.db
+data/*.db-journal
+shop-api/logs/*.log
+reference/
