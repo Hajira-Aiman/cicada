@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS leak_counters (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS region_states (
+    region VARCHAR(32) PRIMARY KEY,
+    is_paused BOOLEAN DEFAULT FALSE,
+    paused_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+INSERT INTO region_states (region, is_paused) VALUES ('in', FALSE), ('eu', FALSE)
+ON CONFLICT (region) DO NOTHING;
+
 ALTER TABLE tenants ADD COLUMN IF NOT EXISTS pinned_policy_hash VARCHAR(128);
 
 -- Seed initial tenants & guards

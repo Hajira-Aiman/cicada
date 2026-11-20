@@ -98,6 +98,12 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 leak_count INTEGER DEFAULT 0,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS region_states (
+                region TEXT PRIMARY KEY,
+                is_paused INTEGER DEFAULT 0,
+                paused_at TEXT
+            );
+            INSERT OR IGNORE INTO region_states (region, is_paused) VALUES ('in', 0), ('eu', 0);
             INSERT OR IGNORE INTO tenants (tenant_id, name, assigned_region, pinned_policy_hash) VALUES
                 ('acme', 'Acme Shop A', 'in', 'sha256:v1-default-policy'),
                 ('globex', 'Globex Shop B', 'eu', 'sha256:ab1289cf001e35a9'),
@@ -607,6 +613,56 @@ def get_audit_logs(
         params.append(limit)
         cur.execute(q, tuple(params))
         return [dict(r) for r in cur.fetchall()]
+
+
+def get_tenant_assigned_region(tenant_id: str) -> Optional[str]:
+    """Returns assigned region ('in' or 'eu') for a given tenant."""
+    query = "SELECT assigned_region FROM tenants WHERE tenant_id = %s;" if is_postgres_available() else "SELECT assigned_region FROM tenants WHERE tenant_id = ?;"
+    rows = execute_query("airlock_core", query, (tenant_id,))
+    if rows and rows[0].get("assigned_region"):
+        return rows[0]["assigned_region"]
+    return None
+
+
+def is_region_paused(region: str) -> bool:
+    """Checks whether ingestion for the specified region is paused."""
+    query = "SELECT is_paused FROM region_states WHERE region = %s;" if is_postgres_available() else "SELECT is_paused FROM region_states WHERE region = ?;"
+    try:
+        rows = execute_query("airlock_core", query, (region,))
+        if rows:
+            return bool(rows[0].get("is_paused"))
+    except Exception:
+        pass
+    return False
+
+
+def set_region_paused(region: str, paused: bool) -> None:
+    """Pauses or resumes ingestion for a region."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO region_states (region, is_paused, paused_at)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (region) DO UPDATE SET is_paused = EXCLUDED.is_paused, paused_at = EXCLUDED.paused_at;
+                    """,
+                    (region, paused, now_iso),
+                )
+            conn.commit()
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR REPLACE INTO region_states (region, is_paused, paused_at)
+        VALUES (?, ?, ?);
+        """,
+        (region, 1 if paused else 0, now_iso),
+    )
+    conn_sq.commit()
 
 
 def get_tenant_pinned_policy(tenant_id: str) -> Optional[str]:

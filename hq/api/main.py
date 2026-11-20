@@ -6,6 +6,7 @@ role-based tenant separation (engineer vs customer),
 and database-enforced Row-Level Security (RLS).
 """
 
+import json
 import os
 import uuid
 from typing import Any, Dict, List, Optional
@@ -19,6 +20,9 @@ from hq.db import (
     authenticate_user,
     execute_query,
     init_all_databases,
+    is_region_paused,
+    log_audit_event,
+    set_region_paused,
     verify_session_token,
 )
 
@@ -154,7 +158,52 @@ def get_health(user: Dict[str, Any] = Depends(get_current_user)):
 @app.get("/api/reconciliation")
 def get_reconciliation(user: Dict[str, Any] = Depends(get_current_user)):
     rows = query_tenant_data(user, "guard_reconciliation", select_cols="guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen")
+    for r in rows:
+        if isinstance(r.get("gaps"), str):
+            r["gaps"] = json.loads(r["gaps"])
     return {"reconciliation": rows}
+
+
+@app.get("/api/reconciliation/{guard_id}")
+def get_reconciliation_for_guard(guard_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    rows = query_tenant_data(user, "guard_reconciliation", select_cols="guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen")
+    for r in rows:
+        if r["guard_id"] == guard_id:
+            if isinstance(r.get("gaps"), str):
+                r["gaps"] = json.loads(r["gaps"])
+            return r
+    raise HTTPException(status_code=404, detail=f"Reconciliation stats for guard '{guard_id}' not found")
+
+
+@app.post("/api/regions/{region}/pause")
+def pause_region_endpoint(region: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    if region not in ("in", "eu"):
+        raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
+    if user and user.get("role") == "customer":
+        raise HTTPException(status_code=403, detail="Customer cannot pause regions")
+    set_region_paused(region, True)
+    actor = user.get("user_id", "chaos-console") if user else "chaos-console"
+    log_audit_event(actor=actor, action="region_paused", details={"region": region})
+    return {"status": "ok", "region": region, "is_paused": True}
+
+
+@app.post("/api/regions/{region}/unpause")
+def unpause_region_endpoint(region: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    if region not in ("in", "eu"):
+        raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
+    if user and user.get("role") == "customer":
+        raise HTTPException(status_code=403, detail="Customer cannot unpause regions")
+    set_region_paused(region, False)
+    actor = user.get("user_id", "chaos-console") if user else "chaos-console"
+    log_audit_event(actor=actor, action="region_unpaused", details={"region": region})
+    return {"status": "ok", "region": region, "is_paused": False}
+
+
+@app.get("/api/regions/{region}/status")
+def get_region_status(region: str):
+    if region not in ("in", "eu"):
+        raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
+    return {"region": region, "is_paused": is_region_paused(region)}
 
 
 @app.websocket("/ws/live")

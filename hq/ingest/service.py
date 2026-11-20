@@ -24,7 +24,9 @@ from pydantic import ValidationError
 from contracts.models import AirlockPayload, IngestReceipt
 from hq.db import (
     check_chain_integrity,
+    get_tenant_assigned_region,
     get_tenant_pinned_policy,
+    is_region_paused,
     log_audit_event,
     lookup_guard,
     record_leak_detected,
@@ -93,6 +95,11 @@ def process_ingest_payload(
     7. Insert once by payload_id (idempotent)
     8. Seq gap and prev_hash chain tracking -> 422 on chain break
     """
+    # 0. Region pause check (503 Service Unavailable, no failover forwarding)
+    if is_region_paused(region):
+        log_audit_event(actor=guard_id or "unknown", action="region_paused_reject", details={"region": region})
+        return 503, {"error": f"Region '{region}' is paused", "detail": f"Region '{region}' is paused"}
+
     # 1. Known guard check
     if not guard_id:
         log_audit_event(actor="unknown", action="missing_guard_header", details={"region": region})
@@ -105,6 +112,17 @@ def process_ingest_payload(
 
     tenant_id = guard_record["tenant_id"]
     secret = guard_record["hmac_secret"]
+
+    # Data residency check
+    assigned_region = get_tenant_assigned_region(tenant_id)
+    if assigned_region and assigned_region != region:
+        log_audit_event(
+            actor=guard_id,
+            action="residency_violation",
+            tenant_id=tenant_id,
+            details={"region": region, "assigned_region": assigned_region},
+        )
+        return 403, {"error": f"Data residency violation: tenant '{tenant_id}' is assigned to region '{assigned_region}', not '{region}'"}
 
     # 2. Valid HMAC (raw body) check
     if not signature:
