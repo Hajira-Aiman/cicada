@@ -25,7 +25,18 @@ export const CopilotDrawer: React.FC = () => {
   ]);
   const [isTyping, setIsTyping] = useState(false);
 
-  if (!copilotOpen) return null;
+  if (!copilotOpen) {
+    return (
+      <button
+        onClick={() => setCopilotOpen(true)}
+        className="fixed bottom-6 right-6 z-40 px-3.5 py-2.5 rounded-full bg-[#0d131f]/90 hover:bg-[#141d30] text-sky-400 border border-sky-500/30 hover:border-sky-400 shadow-[0_4px_25px_rgba(0,0,0,0.5)] flex items-center space-x-2 font-mono text-xs font-bold transition-all hover:scale-105 active:scale-95 cursor-pointer backdrop-blur-md"
+        title="Open AIOps Operations Copilot"
+      >
+        <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse" />
+        <span>AI COPILOT</span>
+      </button>
+    );
+  }
 
   const handleSend = async (e: React.FormEvent) => {
     e.preventDefault();

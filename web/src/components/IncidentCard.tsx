@@ -103,7 +103,9 @@ Rollback: ${rec.rollback || 'n/a'}`);
             <span>·</span>
             <span>Started: <TimeText timestamp={incident.started_at} /></span>
             <span>·</span>
-            <span className="text-slate-300">Tenant: <strong className="text-white">{incident.tenant_id.toUpperCase()}</strong></span>
+            <span className="text-slate-300">
+              Target: <strong className="text-sky-400 font-bold">{incident.tenant_id === 'acme' ? 'SYSTEM 1' : incident.tenant_id === 'globex' ? 'SYSTEM 2' : incident.tenant_id.toUpperCase()}</strong>
+            </span>
           </div>
         </div>
 

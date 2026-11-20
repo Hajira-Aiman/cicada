@@ -9,7 +9,9 @@ export const PrivacyTab: React.FC = () => {
   const reconciliation = useLiveStore((s) => s.reconciliation);
 
   const reconRows: ReconciliationRow[] = Object.values(reconciliation);
-  const checkpointList: CheckpointInfo[] = Object.values(checkpoints);
+
+  // Strictly System 1 and System 2 checkpoints
+  const systemCheckpoints: CheckpointInfo[] = Object.values(checkpoints);
 
   const allowListFields = [
     { field: 'metrics[].name', allowed: 'cpu_pct, latency_ms, net_out_kbps, mem_pct, disk_pct, packet_loss_pct' },
@@ -22,59 +24,72 @@ export const PrivacyTab: React.FC = () => {
   ];
 
   return (
-    <div className="p-4 space-y-4 max-w-[1920px] mx-auto font-mono text-xs">
+    <div className="p-5 space-y-5 max-w-[1700px] mx-auto font-mono text-xs select-none">
       {/* Proof Hero Banner */}
-      <div className="hud-panel p-5 border border-purple-500/40 bg-purple-950/20 flex flex-col md:flex-row md:items-center justify-between space-y-3 md:space-y-0">
+      <div className="hud-panel p-5 border border-purple-500/40 bg-purple-950/20 flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <span className="text-[10px] uppercase tracking-widest text-purple-400 font-bold block">
-            TIER 1 PRIVACY TRIPWIRE & CANARY STATUS
-          </span>
+          <div className="flex items-center space-x-2">
+            <span className="w-2 h-2 rounded-full bg-purple-400 animate-pulse"></span>
+            <span className="text-[10px] uppercase tracking-widest text-purple-400 font-bold">
+              CANARY TRIPWIRE & PRIVACY GUARANTEE
+            </span>
+          </div>
           <span className="text-xl font-black text-white mt-1 block">
             CANARIES PLANTED {counters.canaries_planted.toLocaleString()} · LEAKS DETECTED {counters.leaks_detected}
           </span>
           <p className="text-slate-300 text-xs mt-1">
-            Tripwires actively plant synthetic canary credentials in raw logs. If a canary ever reaches Head Office Ingest, the platform halts and fails the audit.
+            Tripwires plant synthetic credentials in edge logs. If a canary ever crosses into Cloud Dashboard Ingest, the platform triggers an emergency tamper alarm.
           </p>
         </div>
         <div className="text-right">
-          <span className="px-3 py-1.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-bold text-xs inline-block">
+          <span className="px-3.5 py-2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-bold text-xs inline-block">
             ✓ ZERO DATA LEAKAGE VERIFIED
           </span>
         </div>
       </div>
 
-      {/* 60s Checkpoints per guard */}
-      <div className="space-y-2">
-        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-          60-SECOND ROLLING CHECKPOINTS (MERKLE LOG ROOT INTEGRITY)
-        </span>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {checkpointList.map((cp) => (
-            <div key={cp.guard_id} className="hud-panel p-3.5 space-y-2 border-purple-500/30">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-white uppercase">{cp.guard_id}</span>
-                <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                  {cp.match ? '✓ ROOT MATCH' : '✕ MISMATCH'}
-                </span>
+      {/* 60s Checkpoints: System 1 & System 2 */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
+            60-SECOND ROLLING CHECKPOINTS (MERKLE LOG ROOT INTEGRITY)
+          </span>
+          <span className="text-[11px] text-slate-500">Every 60s, edge & cloud verify cryptographic log roots</span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {systemCheckpoints.map((cp, idx) => {
+            const sysName = idx === 0 ? 'SYSTEM 1' : 'SYSTEM 2';
+            return (
+              <div key={cp.guard_id} className="hud-panel p-4 space-y-2.5 border-purple-500/30">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-black text-white text-sm">{sysName}</span>
+                    <span className="text-[10px] text-slate-400">({cp.guard_id})</span>
+                  </div>
+                  <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                    {cp.match ? '✓ ROOT MATCH' : '✕ MISMATCH'}
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-300">
+                  Verified through Seq <strong className="text-white">#{cp.up_to_seq}</strong>
+                </div>
+                <div className="p-2.5 rounded bg-[#080A10] border border-white/5 text-[10px] text-purple-300 font-mono break-all">
+                  ROOT: {cp.root}
+                </div>
               </div>
-              <div className="text-[11px] text-slate-300">
-                Verified through Seq <strong className="text-white">#{cp.up_to_seq}</strong>
-              </div>
-              <div className="p-2 rounded bg-[#080A10] border border-white/5 text-[10px] text-purple-300 truncate">
-                ROOT: {cp.root}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
       {/* Stream Reconciliation Table */}
       <ReconciliationTable rows={reconRows} />
 
-      {/* Allow-List Schema Contract */}
+      {/* Strict Allow-List Contract */}
       <div className="hud-panel p-4 space-y-3">
         <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
-          STRICT CONTRACT ALLOW-LIST (WHAT IS PERMITTED ACROSS THE GATE)
+          STRICT CONTRACT ALLOW-LIST (WHAT IS PERMITTED ACROSS THE TRUST GATE)
         </span>
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
@@ -98,3 +113,5 @@ export const PrivacyTab: React.FC = () => {
     </div>
   );
 };
+
+export default PrivacyTab;

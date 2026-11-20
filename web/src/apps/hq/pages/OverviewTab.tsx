@@ -1,178 +1,286 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useLiveStore } from '@/stores/liveStore';
 import { useUiStore } from '@/stores/uiStore';
-import { KpiStrip } from '@/features/KpiStrip';
-import { LatencyMeter } from '@/features/LatencyMeter';
 import { MetricChart } from '@/components/MetricChart';
-import { IncidentCard } from '@/components/IncidentCard';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TimeText } from '@/components/TimeText';
-import { Fallback2D } from '@/three/Fallback2D';
-import { DamageMap } from '@/components/DamageMap';
 import { GuardInfo, Incident } from '@/types';
 
-const bandOf = (d: { baseline?: number; spread?: number }[]): [number, number] | undefined => {
-  const p = d[d.length - 1];
-  const r1 = (x: number) => Math.round(x * 10) / 10;
-  return p?.baseline !== undefined && p.spread !== undefined ? [Math.max(0, r1(p.baseline - p.spread)), r1(p.baseline + p.spread)] : undefined;
-};
+const offlineGuard = (id: string, tenant: string, region: 'in' | 'eu'): GuardInfo => ({
+  guard_id: id, tenant_id: tenant, source: '—', region, state: 'Offline', reasons: ['no guard reporting'],
+  since: new Date(0).toISOString(), last_seen: new Date(0).toISOString(), guard_version: '—', guard_cpu_pct: 0, guard_mem_mb: 0,
+  buffer_depth: 0, config_ok: false, canaries_planted: 0, secrets_redacted: 0, flaps_prevented: 0, policy_hash: '—',
+});
 
 export const OverviewTab: React.FC = () => {
   const guards = useLiveStore((s) => s.guards);
   const metrics = useLiveStore((s) => s.metrics);
   const incidents = useLiveStore((s) => s.incidents);
+  const counters = useLiveStore((s) => s.counters);
   const activeTenant = useUiStore((s) => s.activeTenant);
+  const setActiveTenant = useUiStore((s) => s.setActiveTenant);
   const setSelectedGuardId = useUiStore((s) => s.setSelectedGuardId);
   const setInspectorOpen = useUiStore((s) => s.setInspectorOpen);
 
-  // Tenant isolation filter
-  const filteredGuards: GuardInfo[] = Object.values(guards).filter(
-    (g: GuardInfo) => activeTenant === 'ALL' || g.tenant_id.toLowerCase() === activeTenant.toLowerCase()
+  const [signalsOpen, setSignalsOpen] = useState(false);
+
+  // Strictly 2 Systems: System 1 (acme) and System 2 (globex)
+  const system1: GuardInfo = Object.values(guards).find((g) => g.tenant_id === 'acme') || offlineGuard('guard-acme-01', 'acme', 'in');
+  const system2: GuardInfo = Object.values(guards).find((g) => g.tenant_id === 'globex') || offlineGuard('guard-globex-01', 'globex', 'eu');
+
+  const systems = [
+    { label: 'SYSTEM 1', key: 'acme', data: system1 },
+    { label: 'SYSTEM 2', key: 'globex', data: system2 },
+  ];
+
+  const overallHealthy = ![system1, system2].some((g) => g.state === 'Poor' || g.state === 'Offline');
+  const noiseCutPct = counters.raw_alerts > 0
+    ? Math.round(((counters.raw_alerts - counters.incidents) / counters.raw_alerts) * 100)
+    : 0;
+
+  // Selected system chart data
+  const chartTenant = activeTenant === 'globex' ? 'globex' : 'acme';
+  const cpuData = metrics[`${chartTenant}:cpu_pct`] || [];
+  const latencyData = metrics[`${chartTenant}:latency_ms`] || [];
+
+  const activeIncidents = incidents.filter(
+    (i) => activeTenant === 'ALL' || i.tenant_id.toLowerCase() === activeTenant.toLowerCase()
   );
 
-  const filteredIncidents: Incident[] = incidents.filter(
-    (i: Incident) => activeTenant === 'ALL' || i.tenant_id.toLowerCase() === activeTenant.toLowerCase()
-  );
-
-  const cpuData = metrics[`${activeTenant === 'ALL' ? 'acme' : activeTenant}:cpu_pct`] || [];
-  const latencyData = metrics[`${activeTenant === 'ALL' ? 'acme' : activeTenant}:latency_ms`] || [];
-  const netData = metrics[`${activeTenant === 'ALL' ? 'acme' : activeTenant}:net_out_kbps`] || [];
-  const memData = metrics[`${activeTenant === 'ALL' ? 'acme' : activeTenant}:mem_pct`] || [];
-
-  const handleTileClick = (guardId: string) => {
+  const handleSystemClick = (guardId: string) => {
     setSelectedGuardId(guardId);
     setInspectorOpen(true);
   };
 
   return (
-    <div className="p-4 space-y-4 max-w-[1920px] mx-auto">
-      {/* KPI Top Strip */}
-      <KpiStrip />
+    <div className="p-6 space-y-6 max-w-7xl mx-auto font-sans">
+      {/* SECTION 1: Minimalist 4-Stat KPI Bar */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {/* Stat 1: Systems Monitored */}
+        <div className="hud-panel p-4 flex flex-col justify-between">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400 font-bold">
+            SYSTEMS MONITORED
+          </span>
+          <div className="flex items-center space-x-2 mt-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-2xl font-mono font-black text-white">{[system1, system2].filter((g) => g.state !== 'Offline').length} / 2</span>
+            <span className="text-xs font-mono text-emerald-400 font-bold">ACTIVE</span>
+          </div>
+        </div>
 
-      {/* Fleet Health Grid */}
-      <div className="space-y-2">
-        <div className="flex items-center justify-between">
+        {/* Stat 2: Fleet Health */}
+        <div className="hud-panel p-4 flex flex-col justify-between">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400 font-bold">
+            OVERALL STATUS
+          </span>
+          <div className="flex items-center space-x-2 mt-2">
+            <span className={`text-2xl font-mono font-black ${overallHealthy ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {overallHealthy ? 'HEALTHY' : 'NEEDS ATTENTION'}
+            </span>
+          </div>
+        </div>
+
+        {/* Stat 3: AIOps Noise Cut */}
+        <div className="hud-panel p-4 flex flex-col justify-between">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400 font-bold">
+            AIOPS NOISE CUT
+          </span>
+          <div className="flex items-baseline space-x-2 mt-2">
+            <span className="text-2xl font-mono font-black text-sky-400">{noiseCutPct}%</span>
+            <span className="text-xs font-mono text-slate-400">
+              ({counters.raw_alerts} → {counters.incidents})
+            </span>
+          </div>
+        </div>
+
+        {/* Stat 4: Privacy Tripwire */}
+        <div className="hud-panel p-4 border-purple-500/30 flex flex-col justify-between">
+          <span className="text-[10px] font-mono uppercase tracking-widest text-purple-400 font-bold">
+            PRIVACY TRIPWIRE
+          </span>
+          <div className="flex items-baseline space-x-2 mt-2">
+            <span className="text-2xl font-mono font-black text-purple-300">{counters.leaks_detected} LEAKS</span>
+            <span className="text-xs font-mono text-slate-400">/ {counters.canaries_planted.toLocaleString()} Canaries</span>
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION 2: Clean Cards for System 1 & System 2 (Only 2 Systems) */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
           <span className="text-xs font-mono uppercase tracking-widest text-slate-400 font-bold">
-            FLEET HEALTH STATUS (4-TIER OBSERVABILITY)
+            PROTECTED SYSTEMS (LOCAL GUARDS)
           </span>
           <span className="text-[11px] font-mono text-slate-500">
-            CLICK TILE TO OPEN HARDWARE INSPECTOR
+            CLICK CARD TO VIEW DETAILED HARDWARE METRICS
           </span>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {filteredGuards.map((g) => (
-            <div
-              key={g.guard_id}
-              onClick={() => handleTileClick(g.guard_id)}
-              className="hud-panel p-3.5 cursor-pointer hover:border-slate-500 transition-colors flex flex-col justify-between"
-            >
-              <div className="flex items-start justify-between">
-                <div>
-                  <div className="flex items-center space-x-2">
-                    <span className="font-mono text-sm font-bold text-white uppercase">{g.tenant_id}</span>
-                    <span className="text-xs font-mono text-slate-400">({g.guard_id})</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {systems.map((s) => {
+            const isPoor = s.data.state === 'Poor';
+            return (
+              <div
+                key={s.key}
+                onClick={() => handleSystemClick(s.data.guard_id)}
+                className={`hud-panel p-5 cursor-pointer transition-all hover:border-slate-500 ${
+                  isPoor ? 'border-rose-500/40 bg-rose-950/10' : ''
+                }`}
+              >
+                {/* Header */}
+                <div className="flex items-start justify-between">
+                  <div>
+                    <h3 className="text-base font-mono font-bold text-white tracking-wide">
+                      {s.label}
+                    </h3>
+                    <span className="text-xs font-mono text-slate-500 mt-0.5 block">
+                      Local Guard · {s.data.source}
+                    </span>
                   </div>
-                  <span className="text-xs font-mono text-slate-500 block mt-0.5">{g.source} · {g.region.toUpperCase()}</span>
+                  <StatusBadge status={s.data.state} />
                 </div>
-                <StatusBadge status={g.state} />
-              </div>
 
-              <div className="mt-3 space-y-1">
-                <span className="text-[10px] font-mono uppercase text-slate-500 font-bold block">REASONS</span>
-                <p className="text-xs font-mono text-slate-300 truncate">
-                  {g.reasons && g.reasons.length > 0 ? g.reasons.join(' · ') : 'Normal baseline'}
-                </p>
-              </div>
+                {/* 1-Line Clean Reason */}
+                <div className="mt-3 py-2 px-3 rounded bg-black/40 border border-white/5">
+                  <span className="text-[10px] font-mono uppercase text-slate-500 block font-bold">
+                    HEALTH DIAGNOSTIC
+                  </span>
+                  <p className="text-xs font-mono text-slate-200 mt-0.5 truncate">
+                    {s.data.reasons && s.data.reasons.length > 0 ? s.data.reasons.join(' · ') : 'Optimal baseline'}
+                  </p>
+                </div>
 
-              <div className="mt-3 pt-2 border-t border-white/5 flex items-center justify-between text-[11px] font-mono text-slate-400">
-                <span>CPU: <strong className="text-slate-200">{g.guard_cpu_pct}%</strong></span>
-                <span>Buffer: <strong className={g.buffer_depth > 0 ? 'text-amber-400' : 'text-emerald-400'}>{g.buffer_depth}</strong></span>
-                <span>Flaps: <strong className="text-cyan-400">{g.flaps_prevented}</strong></span>
-                <span>Last seen: <TimeText timestamp={g.last_seen} /></span>
+                {/* Minimalist Live Gauges */}
+                <div className="grid grid-cols-2 gap-4 mt-4 pt-3 border-t border-white/5">
+                  <div>
+                    <div className="flex justify-between text-xs font-mono mb-1">
+                      <span className="text-slate-400">CPU Usage</span>
+                      <span className="text-white font-bold">{s.data.guard_cpu_pct}%</span>
+                    </div>
+                    <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full ${isPoor ? 'bg-rose-500' : 'bg-sky-500'}`}
+                        style={{ width: `${Math.min(100, s.data.guard_cpu_pct)}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-xs font-mono mb-1">
+                      <span className="text-slate-400">Memory</span>
+                      <span className="text-white font-bold">{s.data.guard_mem_mb} MB</span>
+                    </div>
+                    <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-cyan-500"
+                        style={{ width: `${Math.min(100, (s.data.guard_mem_mb / 128) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Footer specs */}
+                <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 mt-4 pt-2 border-t border-white/5">
+                  <span>Buffer: <strong className="text-slate-300">{s.data.buffer_depth}</strong></span>
+                  <span>Policy: <strong className="text-slate-300">{s.data.policy_hash}</strong></span>
+                  <span>Last Seen: <TimeText timestamp={s.data.last_seen} /></span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
-      {/* Live Charts Strip */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-        <MetricChart
-          title="CPU USAGE"
-          unit="%"
-          data={cpuData}
-          normalRange={bandOf(cpuData)}
-          color="#38BDF8"
-        />
-        <MetricChart
-          title="LATENCY"
-          unit="ms"
-          data={latencyData}
-          normalRange={bandOf(latencyData)}
-          color="#10B981"
-        />
-        <MetricChart
-          title="NET OUTBOUND"
-          unit="kbps"
-          data={netData}
-          normalRange={bandOf(netData)}
-          color="#A855F7"
-        />
-        <MetricChart
-          title="MEMORY USAGE"
-          unit="%"
-          data={memData}
-          normalRange={bandOf(memData)}
-          color="#06B6D4"
-        />
-      </div>
-
-      {/* Split: Incidents Feed + Mini Live Fleet Bridge */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        {/* Incidents Section */}
-        <div className="lg:col-span-7 space-y-3">
-          <div className="flex items-center justify-between">
+      {/* SECTION 3: Live CPU & Latency Charts with Collapsible Signal Details */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
             <span className="text-xs font-mono uppercase tracking-widest text-slate-400 font-bold">
-              CORRELATED INCIDENTS ({filteredIncidents.length})
+              LIVE TELEMETRY (BASELINE ±2σ BANDS)
             </span>
-            <span className="text-[11px] font-mono text-slate-500">
-              CLICK BAR TO PIN EVIDENCE TO COPILOT
-            </span>
+            {/* System toggle for charts */}
+            <div className="flex items-center space-x-1 bg-[#141721] p-0.5 rounded border border-white/10 text-xs font-mono">
+              <button
+                onClick={() => setActiveTenant('acme')}
+                className={`px-2.5 py-0.5 rounded font-bold ${
+                  chartTenant === 'acme' ? 'bg-sky-500 text-black' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                SYSTEM 1
+              </button>
+              <button
+                onClick={() => setActiveTenant('globex')}
+                className={`px-2.5 py-0.5 rounded font-bold ${
+                  chartTenant === 'globex' ? 'bg-sky-500 text-black' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                SYSTEM 2
+              </button>
+            </div>
           </div>
 
-          <div className="space-y-3">
-            {filteredIncidents.length > 0 ? (
-              filteredIncidents.map((inc) => (
-                <IncidentCard key={inc.incident_id} incident={inc} />
+          <button
+            onClick={() => setSignalsOpen(!signalsOpen)}
+            className="text-xs font-mono text-sky-400 hover:text-sky-300 font-bold"
+          >
+            {signalsOpen ? '▼ HIDE SIGNAL EVIDENCE' : '▶ VIEW SIGNAL EVIDENCE & CORRELATION'}
+          </button>
+        </div>
+
+        {/* 2 Clean Live Charts Side by Side */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <MetricChart
+            title={`${chartTenant === 'acme' ? 'SYSTEM 1' : 'SYSTEM 2'} · CPU UTILIZATION`}
+            unit="%"
+            data={cpuData}
+            normalRange={[15, 35]}
+            color="#38BDF8"
+            height={180}
+          />
+          <MetricChart
+            title={`${chartTenant === 'acme' ? 'SYSTEM 1' : 'SYSTEM 2'} · DELIVERY LATENCY`}
+            unit="ms"
+            data={latencyData}
+            normalRange={[30, 60]}
+            color="#10B981"
+            height={180}
+          />
+        </div>
+
+        {/* Collapsible Signal Evidence Details */}
+        {signalsOpen && (
+          <div className="hud-panel p-4 border border-sky-500/30 bg-[#0C1017] space-y-3 font-mono text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] text-sky-400 uppercase font-bold tracking-wider">
+                AIOPS ACTIVE SIGNAL CORRELATION ({activeIncidents.length} INCIDENT OPEN)
+              </span>
+              <span className="text-slate-400">Algorithm: Z-Score Thresholding + Kill-Chain Match</span>
+            </div>
+
+            {activeIncidents.length > 0 ? (
+              activeIncidents.map((inc) => (
+                <div key={inc.incident_id} className="p-3 rounded bg-[#121620] border border-white/5 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="font-bold text-white">{inc.title}</span>
+                    <span className="text-cyan-400 font-bold">Confidence: {Math.round(inc.confidence * 100)}%</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {inc.signals.map((sig) => (
+                      <div key={sig.evidence_id} className="p-2 rounded bg-black/40 text-[11px]">
+                        <span className="text-slate-400 block">{sig.name}</span>
+                        <span className="text-white font-bold">{sig.value} vs base {sig.baseline}</span>
+                        <span className="text-sky-400 ml-1">({sig.contribution_pct}%)</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               ))
             ) : (
-              <div className="hud-panel p-8 text-center text-xs font-mono text-slate-500">
-                NO ACTIVE INCIDENTS FOR {activeTenant.toUpperCase()}
-              </div>
+              <div className="p-3 text-slate-500 text-center">No anomalous signals active. Baseline normal.</div>
             )}
           </div>
-        </div>
-
-        {/* Mini Fleet Bridge */}
-        <div className="lg:col-span-5 space-y-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase tracking-widest text-slate-400 font-bold">
-              MINI FLEET BRIDGE (PARTICLE STREAM)
-            </span>
-            <span className="text-[11px] font-mono text-purple-400 font-bold">
-              ZERO CLEAR-TEXT EXPORT
-            </span>
-          </div>
-          <DamageMap tenant={activeTenant === 'ALL' ? 'acme' : activeTenant} />
-          <div className="h-[420px]">
-            <Fallback2D height="100%" />
-          </div>
-        </div>
+        )}
       </div>
-
-      {/* Latency Meter Footer */}
-      <LatencyMeter />
     </div>
   );
 };

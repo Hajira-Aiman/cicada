@@ -23,7 +23,7 @@ export const ReconciliationTable: React.FC<ReconciliationTableProps> = ({ rows }
           <thead className="bg-[#141721] text-slate-400 uppercase text-[10px] tracking-wider border-b border-white/5">
             <tr>
               <th className="p-2.5">Guard ID</th>
-              <th className="p-2.5">Tenant</th>
+              <th className="p-2.5">System</th>
               <th className="p-2.5 text-right">Sent</th>
               <th className="p-2.5 text-right">Received</th>
               <th className="p-2.5 text-right">Duplicates</th>
@@ -38,7 +38,9 @@ export const ReconciliationTable: React.FC<ReconciliationTableProps> = ({ rows }
               return (
                 <tr key={row.guard_id} className="hover:bg-white/[0.02]">
                   <td className="p-2.5 font-bold text-slate-200">{row.guard_id}</td>
-                  <td className="p-2.5 uppercase">{row.tenant_id}</td>
+                  <td className="p-2.5 uppercase font-bold text-sky-400">
+                    {row.tenant_id === 'acme' ? 'SYSTEM 1' : row.tenant_id === 'globex' ? 'SYSTEM 2' : row.tenant_id.toUpperCase()}
+                  </td>
                   <td className="p-2.5 text-right font-tabular">{row.sent_count.toLocaleString()}</td>
                   <td className="p-2.5 text-right font-tabular text-emerald-400">{row.received_count.toLocaleString()}</td>
                   <td className="p-2.5 text-right font-tabular text-slate-500">{row.duplicate_count}</td>
