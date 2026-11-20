@@ -223,6 +223,10 @@ CREATE TABLE IF NOT EXISTS aiops_counters (
 );
 GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
 
+CREATE INDEX IF NOT EXISTS idx_payloads_guard_seq ON payloads(guard_id, seq);
+CREATE INDEX IF NOT EXISTS idx_metrics_payload ON metrics(payload_id);
+CREATE INDEX IF NOT EXISTS idx_events_payload ON events(payload_id);
+
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE metrics ENABLE ROW LEVEL SECURITY;
@@ -447,6 +451,10 @@ CREATE TABLE IF NOT EXISTS aiops_counters (
     updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
+
+CREATE INDEX IF NOT EXISTS idx_payloads_guard_seq ON payloads(guard_id, seq);
+CREATE INDEX IF NOT EXISTS idx_metrics_payload ON metrics(payload_id);
+CREATE INDEX IF NOT EXISTS idx_events_payload ON events(payload_id);
 
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
