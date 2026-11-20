@@ -120,7 +120,7 @@ class PseudonymManager:
         with self.connection() as conn:
             conn.execute(
                 """
-                INSERT OR REPLACE INTO reveal (pseudonym, prefix, raw_value, created_at)
+                INSERT OR IGNORE INTO reveal (pseudonym, prefix, raw_value, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
                 (pseudonym, prefix, raw_value, now),

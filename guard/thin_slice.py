@@ -508,16 +508,12 @@ class GuardThinSlice:
         Drains the outbox in oldest-first order (seq ASC) with backoff.
         """
         def _send(payload_id: str, body_bytes: bytes, client_obj: Optional[httpx.Client]):
-            try:
-                p_data = json.loads(body_bytes.decode("utf-8"))
-                sent_at = p_data.get("sent_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-            except Exception:
-                sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
+            # Header timestamp is the request send time (contracts.md), not the payload's
+            # creation time: buffered payloads must still pass ingest's +/-300s window.
             headers = create_auth_headers(
                 guard_id=self.config.GUARD_ID,
                 body_bytes=body_bytes,
-                timestamp_iso=sent_at,
+                timestamp_iso=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 secret_key=self.config.GUARD_SECRET_KEY,
             )
             should_close = False

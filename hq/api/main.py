@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -212,7 +212,7 @@ def list_tenants(user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
 
 
 @app.get("/api/metrics")
-def get_metrics(since: Optional[str] = None, limit: int = 5000, user: Dict[str, Any] = Depends(get_current_user)):
+def get_metrics(since: Optional[str] = None, limit: int = Query(5000, ge=1, le=20000), user: Dict[str, Any] = Depends(get_current_user)):
     """Newest first; `since` (ISO time) returns only newer rows, and at most `limit` rows per region come back."""
     where, params = "", ()
     if since:
@@ -223,13 +223,13 @@ def get_metrics(since: Optional[str] = None, limit: int = 5000, user: Dict[str, 
 
 
 @app.get("/api/events")
-def get_events(limit: int = 200, user: Dict[str, Any] = Depends(get_current_user)):
+def get_events(limit: int = Query(200, ge=1, le=5000), user: Dict[str, Any] = Depends(get_current_user)):
     rows = query_tenant_data(user, "events", select_cols="id, payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time", order_by="event_time DESC", limit=limit)
     return {"events": rows}
 
 
 @app.get("/api/health/history")
-def get_health_history(limit: int = 100, user: Dict[str, Any] = Depends(get_current_user)):
+def get_health_history(limit: int = Query(100, ge=1, le=5000), user: Dict[str, Any] = Depends(get_current_user)):
     """Health transitions written by the AIOps worker, newest first."""
     rows = query_tenant_data(user, "health_history", select_cols="id, tenant_id, source, state, old_state, reasons, at", order_by="at DESC", limit=limit)
     return {"history": sorted(rows, key=lambda r: str(r["at"]), reverse=True)[:limit]}
@@ -331,6 +331,9 @@ class CompareCheckpointRequest(BaseModel):
 
 @app.get("/api/checkpoints/{guard_id}")
 def get_checkpoint_for_guard(guard_id: str, up_to_seq: Optional[int] = None, user: Dict[str, Any] = Depends(get_current_user)):
+    guard = lookup_guard(guard_id)
+    if user.get("role") == "customer" and (not guard or guard["tenant_id"] != user.get("tenant_id")):
+        raise HTTPException(status_code=403, detail="Access denied to this guard's checkpoint")
     return compute_guard_checkpoint(guard_id, up_to_seq=up_to_seq)
 
 
@@ -360,6 +363,8 @@ class DecisionRevealRequest(BaseModel):
 @app.post("/api/reveal-requests")
 def post_reveal_request(req: CreateRevealRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
     tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
+    if user and user.get("role") == "customer":
+        tenant_id = user.get("tenant_id") or tenant_id  # a customer cannot file requests against another tenant
     requested_by = (user.get("user_id") if user else "analyst") or "analyst"
     return create_reveal_request(
         tenant_id=tenant_id,

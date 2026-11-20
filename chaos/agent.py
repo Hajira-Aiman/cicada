@@ -15,6 +15,7 @@ Provides endpoints for:
 """
 
 import os
+import re
 import time
 import uuid
 import threading
@@ -39,6 +40,9 @@ _lock = threading.Lock()
 
 
 # --- Real Chaos Effect Implementations ---
+
+# request-supplied names (service, interface) reach subprocess argv: allow plain identifiers only
+SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 
 def _run_cpu_burner(duration_s: float):
     """Pins every core but one (the guard needs one) for duration_s (one busy child process per core; a Python thread would only reach one core)."""
@@ -142,20 +146,30 @@ def _run_region_outage(region: str, duration_s: float):
 def _run_latency_netem(duration_s: float, delay_ms: int = 450, loss_pct: int = 3, iface: str = "lo"):
     """Applies kernel traffic control delay and packet loss via tc netem on interface."""
     import subprocess
-    cmd_add = f"sudo /usr/sbin/tc qdisc add dev {iface} root netem delay {delay_ms}ms loss {loss_pct}%"
-    cmd_del = f"sudo /usr/sbin/tc qdisc del dev {iface} root"
+    if not SAFE_NAME.match(iface):
+        return
+    add = ["sudo", "/usr/sbin/tc", "qdisc", "add", "dev", iface, "root", "netem", "delay", f"{int(delay_ms)}ms", "loss", f"{int(loss_pct)}%"]
+    delete = ["sudo", "/usr/sbin/tc", "qdisc", "del", "dev", iface, "root"]
+    quiet = dict(check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        subprocess.run(cmd_add, shell=True, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(add, **quiet)
         time.sleep(duration_s)
     finally:
-        subprocess.run(cmd_del, shell=True, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(delete, **quiet)
 
 
 def _run_restart_app(target: Optional[str] = None):
     """Restarts application service via systemctl or docker."""
     import subprocess
     app_name = target or "shop-api"
-    subprocess.run(f"systemctl restart {app_name} 2>/dev/null || docker restart {app_name} 2>/dev/null || true", shell=True)
+    if not SAFE_NAME.match(app_name):
+        return
+    quiet = dict(check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if subprocess.run(["systemctl", "restart", app_name], **quiet).returncode != 0:
+            subprocess.run(["docker", "restart", app_name], **quiet)
+    except OSError:
+        pass  # neither systemctl nor docker on this host (e.g. Windows)
 
 
 class ScenarioRequest(BaseModel):

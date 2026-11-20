@@ -32,11 +32,15 @@ class LogTailer:
             return []
 
         try:
-            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+            if os.path.getsize(self.log_path) < self.offset:
+                self.offset = 0  # file was truncated or rotated
+            with open(self.log_path, "rb") as f:
                 f.seek(self.offset)
-                lines = f.readlines()
-                self.offset = f.tell()
-                return [line.strip() for line in lines if line.strip()]
+                chunk = f.read()
+            end = chunk.rfind(b"\n") + 1  # only complete lines; a partial tail is read next time
+            self.offset += end
+            lines = chunk[:end].decode("utf-8", errors="replace").splitlines()
+            return [line.strip() for line in lines if line.strip()]
         except Exception as e:
             logger.warning(f"Error reading log file {self.log_path}: {e}")
             return []

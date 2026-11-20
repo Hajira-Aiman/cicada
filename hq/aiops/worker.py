@@ -65,7 +65,7 @@ class Region:
         self.manager = Manager(self.engine, self.detector)
         self.last_write = 0.0
         self.narrator = Narrator("airlock_" + name)
-        self.db = psycopg.connect(dsn("airlock_" + name), autocommit=True)
+        self.connect()
         for stmt in filter(None, (x.strip() for x in SCHEMA.split(";"))):
             try:
                 self.db.execute(stmt)
@@ -73,6 +73,9 @@ class Region:
                 log.warning("%s: no rights to create tables (limited role); Sahiti's init script must create them", name)
                 break
         self.cursor = datetime.fromtimestamp(time.time() - REPLAY_S, timezone.utc)
+
+    def connect(self):
+        self.db = psycopg.connect(dsn("airlock_" + self.name), autocommit=True)
 
     def load_overrides(self):
         self.overrides.update({t: c for t, c in self.db.execute("SELECT tenant_id, config FROM tenant_thresholds")})
@@ -106,14 +109,15 @@ class Region:
                                          m.name, m.avg, p.received_at
                                   FROM metrics m JOIN payloads p USING(payload_id)
                                   WHERE p.received_at > %s AND p.received_at <= now() - interval '300 ms'""", (self.cursor,)).fetchall()
-        evs = self.db.execute("""SELECT e.tenant_id, e.source, extract(epoch from e.event_time), e.category, e.severity, e.count, e.actor
-                                 FROM events e JOIN payloads p USING(payload_id)
-                                 WHERE p.received_at > %s AND p.received_at <= now() - interval '300 ms'""", (self.cursor,)).fetchall()
         win = {}
+        old_cursor = self.cursor   # events are read for exactly the range the metrics query consumed (no double count next tick)
         for t, s, ts, arr, name, avg, rcv in rows:
             w = win.setdefault((float(ts), t, s), {"arr": 0.0, "m": {}, "e": []})
             w["arr"] = max(w["arr"], float(arr)); w["m"][name] = avg
             self.cursor = max(self.cursor, rcv)
+        evs = self.db.execute("""SELECT e.tenant_id, e.source, extract(epoch from e.event_time), e.category, e.severity, e.count, e.actor
+                                 FROM events e JOIN payloads p USING(payload_id)
+                                 WHERE p.received_at > %s AND p.received_at <= %s""", (old_cursor, self.cursor)).fetchall()
         for t, s, ts, cat, sev, cnt, actor in evs:
             win.setdefault((float(ts), t, s), {"arr": float(ts), "m": {}, "e": []})["e"].append((cat, sev, cnt, actor))
         return [(k, win[k]) for k in sorted(win)]
@@ -177,7 +181,11 @@ def main():
         t0 = time.time()
         for r in regions:
             try: r.tick(t0)
-            except psycopg.Error as e: log.warning("%s db error: %s", r.name, e)
+            except psycopg.Error as e:
+                log.warning("%s db error: %s", r.name, e)
+                if r.db.closed or isinstance(e, psycopg.OperationalError):
+                    try: r.connect()  # postgres restarted or dropped us: reconnect instead of failing forever
+                    except psycopg.Error: pass
         time.sleep(max(0, 2 - (time.time() - t0)))
 
 
