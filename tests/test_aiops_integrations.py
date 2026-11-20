@@ -18,12 +18,15 @@ from hq.api.main import app
 from hq.db import (
     execute_query,
     init_all_databases,
+    truncate_all_data,
+    update_tenant_counters,
 )
 
 
 @pytest.fixture(autouse=True)
 def setup_db():
     init_all_databases()
+    truncate_all_data()
 
 
 @pytest.mark.anyio
@@ -127,22 +130,31 @@ async def test_websocket_pushes_aiops_messages():
             timestamp=now_iso,
         )
 
-        # 4. Alert opened
+        # 4. Alert opened with AIOps detector fields in body
+        alert_body = {
+            "kind": "anomaly",
+            "signals": [{"source": "host-7f3a1234", "name": "cpu_pct", "val": 95.0}],
+            "second_opinion": 0.92,
+            "agrees": True,
+            "started_at": now_iso,
+            "last_flag_at": now_iso,
+        }
         await broadcaster.push_alert_opened(
             tenant_id="acme",
             alert_id="alt-5001",
             source="host-7f3a1234",
             title="SSH brute force burst",
             severity="high",
-            body="50 failed login attempts in 10s",
+            body=alert_body,
             created_at=now_iso,
         )
 
         # 5. Counters
         await broadcaster.push_counters(
             tenant_id="acme",
-            raw_alerts=12,
+            raw_alerts=16,
             incidents=2,
+            noise_cut_pct=87.5,
             flaps_prevented=4,
         )
 
@@ -150,10 +162,18 @@ async def test_websocket_pushes_aiops_messages():
         types = [m["event_type"] for m in received]
         assert types == ["health_change", "incident_opened", "incident_updated", "alert_opened", "counters"]
 
+        # Check alert_opened extracted fields
+        alert_msg = received[3]
+        assert alert_msg["payload"]["kind"] == "anomaly"
+        assert alert_msg["payload"]["signals"][0]["name"] == "cpu_pct"
+        assert alert_msg["payload"]["second_opinion"] == 0.92
+        assert alert_msg["payload"]["agrees"] is True
+
         # Check counters structure
         counters_msg = received[4]
-        assert counters_msg["payload"]["raw_alerts"] == 12
+        assert counters_msg["payload"]["raw_alerts"] == 16
         assert counters_msg["payload"]["incidents"] == 2
+        assert counters_msg["payload"]["noise_cut_pct"] == 87.5
         assert counters_msg["payload"]["flaps_prevented"] == 4
 
     finally:
@@ -162,30 +182,22 @@ async def test_websocket_pushes_aiops_messages():
 
 @pytest.mark.anyio
 async def test_tenant_counters_endpoint():
-    """GET /api/counters/{tenant_id} returns raw_alerts, incidents, flaps_prevented."""
+    """GET /api/counters/{tenant_id} reads from aiops_counters table (written by hq/aiops/worker.py)."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # Seed an alert, incident, and flap in airlock_in
-        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        execute_query(
-            "airlock_in",
-            "INSERT INTO aiops_alerts (alert_id, tenant_id, title) VALUES (%s, %s, %s) ON CONFLICT (alert_id) DO NOTHING;",
-            ("alt-cnt-1", "acme", "Test Alert"),
-        )
-        execute_query(
-            "airlock_in",
-            "INSERT INTO incidents (incident_id, tenant_id, body, status, started_at) VALUES (%s, %s, %s, %s, %s) ON CONFLICT (incident_id) DO NOTHING;",
-            ("inc-cnt-1", "acme", json.dumps({"title": "Test Inc"}), "open", now_iso),
-        )
-        execute_query(
-            "airlock_in",
-            "INSERT INTO health_current (tenant_id, source, state, reasons, since, flaps_prevented) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, source) DO UPDATE SET flaps_prevented = 5;",
-            ("acme", "host-cnt-1", "Good", json.dumps(["OK"]), now_iso, 5),
+        # Write to aiops_counters table matching hq/aiops/worker.py shape
+        update_tenant_counters(
+            tenant_id="acme",
+            raw_alerts=16,
+            incidents=2,
+            noise_cut_pct=87.5,
+            flaps_prevented=3,
         )
 
         res = await client.get("/api/counters/acme")
         assert res.status_code == 200
         d = res.json()
         assert d["tenant_id"] == "acme"
-        assert d["raw_alerts"] >= 1
-        assert d["incidents"] >= 1
-        assert d["flaps_prevented"] >= 5
+        assert d["raw_alerts"] == 16
+        assert d["incidents"] == 2
+        assert d["noise_cut_pct"] == 87.5
+        assert d["flaps_prevented"] == 3

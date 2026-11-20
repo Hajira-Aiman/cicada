@@ -21,22 +21,29 @@ from hq.db import (
     execute_query,
     init_all_databases,
     is_postgres_available,
+    register_guard,
     store_payload,
+    truncate_all_data,
 )
 
 
 @pytest.fixture(autouse=True)
 def setup_test_data():
     init_all_databases()
-    # Seed sample payloads in airlock_in (acme) and airlock_eu (globex)
+    truncate_all_data()
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    guard_acme = f"guard-acme-sep-{uuid.uuid4().hex[:6]}"
+    guard_globex = f"guard-globex-sep-{uuid.uuid4().hex[:6]}"
+    register_guard(guard_acme, "acme", "sec-acme-key")
+    register_guard(guard_globex, "globex", "sec-globex-key")
 
     # Acme payload in India
     pay_acme = {
         "schema": "airlock.v1",
         "payload_id": f"pay-acme-{uuid.uuid4().hex[:8]}",
         "tenant_id": "acme",
-        "guard_id": "guard-acme-01",
+        "guard_id": guard_acme,
         "seq": 101,
         "prev_hash": "GENESIS",
         "policy_version": "sha256:v1-default-policy",
@@ -54,7 +61,7 @@ def setup_test_data():
         "schema": "airlock.v1",
         "payload_id": f"pay-globex-{uuid.uuid4().hex[:8]}",
         "tenant_id": "globex",
-        "guard_id": "guard-globex-01",
+        "guard_id": guard_globex,
         "seq": 201,
         "prev_hash": "GENESIS",
         "policy_version": "sha256:ab1289cf001e35a9",

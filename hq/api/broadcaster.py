@@ -94,8 +94,25 @@ class Broadcaster:
         await self.broadcast(event)
 
     async def push_alert_opened(
-        self, tenant_id: str, alert_id: str, source: str, title: str, severity: str, body: str, created_at: str
+        self,
+        tenant_id: str,
+        alert_id: str,
+        source: Optional[str],
+        title: str,
+        severity: str,
+        body: Any,
+        created_at: str,
     ):
+        import json
+        parsed_body = body
+        if isinstance(body, str):
+            try:
+                parsed_body = json.loads(body)
+            except Exception:
+                parsed_body = {"raw": body}
+        if not isinstance(parsed_body, dict):
+            parsed_body = {"raw": str(parsed_body)}
+
         event = {
             "event_type": "alert_opened",
             "tenant_id": tenant_id,
@@ -103,16 +120,27 @@ class Broadcaster:
             "payload": {
                 "alert_id": alert_id,
                 "tenant_id": tenant_id,
-                "source": source,
+                "source": source or (parsed_body.get("signals", [{}])[0].get("source") if parsed_body.get("signals") else None),
                 "title": title,
                 "severity": severity,
-                "body": body,
+                "kind": parsed_body.get("kind"),
+                "signals": parsed_body.get("signals", []),
+                "second_opinion": parsed_body.get("second_opinion"),
+                "agrees": parsed_body.get("agrees"),
+                "body": parsed_body,
                 "created_at": created_at,
             },
         }
         await self.broadcast(event)
 
-    async def push_counters(self, tenant_id: str, raw_alerts: int, incidents: int, flaps_prevented: int):
+    async def push_counters(
+        self,
+        tenant_id: str,
+        raw_alerts: int,
+        incidents: int,
+        noise_cut_pct: float = 0.0,
+        flaps_prevented: int = 0,
+    ):
         from datetime import datetime, timezone
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         event = {
@@ -123,6 +151,7 @@ class Broadcaster:
                 "tenant_id": tenant_id,
                 "raw_alerts": raw_alerts,
                 "incidents": incidents,
+                "noise_cut_pct": noise_cut_pct,
                 "flaps_prevented": flaps_prevented,
             },
         }

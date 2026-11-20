@@ -23,6 +23,7 @@ from hq.db import (
     compute_guard_checkpoint,
     create_reveal_request,
     execute_query,
+    get_tenant_assigned_region,
     get_tenant_counters,
     init_all_databases,
     is_region_paused,
@@ -84,8 +85,7 @@ def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = 
         if not user_tenant:
             return []
         # Find assigned region for customer
-        tenant_rows = execute_query("airlock_core", "SELECT assigned_region FROM tenants WHERE tenant_id = %s;", (user_tenant,))
-        region = tenant_rows[0]["assigned_region"] if tenant_rows else "in"
+        region = get_tenant_assigned_region(user_tenant) or "in"
         db_name = "airlock_in" if region == "in" else "airlock_eu"
         query = f"SELECT {select_cols} FROM {table_name}{order_clause};"
         return execute_query(db_name, query, tenant_id=user_tenant)
@@ -154,7 +154,25 @@ def get_payloads(user: Dict[str, Any] = Depends(get_current_user)):
 @app.get("/api/incidents")
 def get_incidents(user: Dict[str, Any] = Depends(get_current_user)):
     rows = query_tenant_data(user, "incidents", select_cols="incident_id, tenant_id, body, status, started_at, updated_at", order_by="started_at DESC")
+    for r in rows:
+        if isinstance(r.get("body"), str):
+            try:
+                r["body"] = json.loads(r["body"])
+            except Exception:
+                pass
     return {"incidents": rows}
+
+
+@app.get("/api/alerts")
+def get_alerts(user: Dict[str, Any] = Depends(get_current_user)):
+    rows = query_tenant_data(user, "aiops_alerts", select_cols="alert_id, tenant_id, source, title, severity, body, status, created_at, updated_at", order_by="created_at DESC")
+    for r in rows:
+        if isinstance(r.get("body"), str):
+            try:
+                r["body"] = json.loads(r["body"])
+            except Exception:
+                pass
+    return {"alerts": rows}
 
 
 @app.get("/api/health")
