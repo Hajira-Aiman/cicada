@@ -7,10 +7,16 @@ for both India (8001) and Europe (8002) regions, confirming 200 receipts and row
 
 import pytest
 from starlette.testclient import TestClient
+from fastapi import FastAPI
 from hq.ingest.main import create_ingest_app
 from hq.db import get_sqlite_conn, init_all_databases
 from guard.thin_slice import GuardThinSlice
 from guard.config import GuardConfig
+
+healthy_shop = FastAPI()
+@healthy_shop.get("/health")
+def _health_ok():
+    return {"status": "ok"}
 
 
 @pytest.fixture(autouse=True)
@@ -28,7 +34,8 @@ def test_guard_to_headoffice_ingest_in():
         cfg.REGION_URL = "/ingest"
 
         guard = GuardThinSlice(cfg=cfg)
-        payload, body_bytes = guard.collect_window(duration_seconds=2.0)
+        with TestClient(healthy_shop) as probe_client:
+            payload, body_bytes = guard.collect_window(duration_seconds=2.0, probe_client=probe_client)
 
         receipt = guard.send_payload(payload, body_bytes, client=client)
 
@@ -66,7 +73,8 @@ def test_guard_to_headoffice_ingest_eu():
         cfg.TIMEZONE = "Europe/Berlin"
 
         guard = GuardThinSlice(cfg=cfg)
-        payload, body_bytes = guard.collect_window(duration_seconds=2.0)
+        with TestClient(healthy_shop) as probe_client:
+            payload, body_bytes = guard.collect_window(duration_seconds=2.0, probe_client=probe_client)
 
         receipt = guard.send_payload(payload, body_bytes, client=client)
 

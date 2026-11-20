@@ -29,30 +29,78 @@ from contracts.models import (
     IngestReceipt,
 )
 from guard.config import config
-from guard.pseudonym import generate_pseudonym
+from guard.pseudonym import generate_pseudonym, PseudonymManager
 from guard.signer import create_auth_headers
+from guard.ledger import GuardLedger
+from guard.outbox import GuardOutbox
+from guard.raw_store import RawStore
+from guard.scrubber import Scrubber
+from guard.detectors import AuthDetector, PowerDetector, ChangeDetector
+from guard.log_tailer import LogTailer
+from guard.policy_gate import PolicyGate
+from contracts.models import Checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("airlock-guard")
 
 
 class GuardThinSlice:
-    def __init__(self, cfg=config):
+    def __init__(
+        self,
+        cfg=config,
+        ledger: Optional[GuardLedger] = None,
+        outbox: Optional[GuardOutbox] = None,
+        raw_store: Optional[RawStore] = None,
+        scrubber: Optional[Scrubber] = None,
+        pseudonym_mgr: Optional[PseudonymManager] = None,
+    ):
         self.config = cfg
-        self.seq = 1
-        self.prev_hash = "GENESIS"
+        db_path = getattr(self.config, "GUARD_DB_PATH", "data/guard.db")
+        raw_db_path = getattr(self.config, "RAW_DB_PATH", "data/raw.db")
+        reveal_db_path = getattr(self.config, "REVEAL_DB_PATH", "data/reveal.db")
+
+        self.ledger = ledger or GuardLedger(db_path=db_path)
+        self.outbox = outbox or GuardOutbox(db_path=db_path, ledger=self.ledger)
+        self.raw_store = raw_store or RawStore(db_path=raw_db_path)
+        self.scrubber = scrubber or Scrubber()
+        self.pseudonym_mgr = pseudonym_mgr or PseudonymManager(
+            tenant_secret=self.config.TENANT_SECRET_KEY,
+            db_path=reveal_db_path,
+        )
+
+        # Resume state from ledger: contiguous sequence with zero gaps
+        last_seq, last_hash = self.ledger.get_last_seq_and_hash()
+        self.seq = last_seq + 1
+        self.prev_hash = last_hash
+
         self.hostname = socket.gethostname()
-        self.host_pseudonym = generate_pseudonym("host", self.hostname, self.config.TENANT_SECRET_KEY)
+        self.host_pseudonym = self.pseudonym_mgr.get_or_create("host", self.hostname)
         self.pending_events: List[EventSample] = []
         self.pending_log_patterns: List[LogPatternSample] = []
 
-        # Service pseudonyms
+        # Service pseudonyms registered in local reveal table
         self.service_pseudonyms = {
-            "shop-api": generate_pseudonym("proc", "shop-api", self.config.TENANT_SECRET_KEY),
-            "login": generate_pseudonym("proc", "login", self.config.TENANT_SECRET_KEY),
-            "checkout": generate_pseudonym("proc", "checkout", self.config.TENANT_SECRET_KEY),
-            "db": generate_pseudonym("proc", "database", self.config.TENANT_SECRET_KEY),
+            "shop-api": self.pseudonym_mgr.get_or_create("proc", "shop-api"),
+            "login": self.pseudonym_mgr.get_or_create("proc", "login"),
+            "checkout": self.pseudonym_mgr.get_or_create("proc", "checkout"),
+            "db": self.pseudonym_mgr.get_or_create("proc", "database"),
         }
+
+        # Local AIOps Detectors (T9, T13, T19)
+        self.auth_detector = AuthDetector(
+            pseudonym_mgr=self.pseudonym_mgr,
+            tenant_tz_str=self.config.TIMEZONE,
+        )
+        self.power_detector = PowerDetector(host_pseudonym=self.host_pseudonym)
+        self.change_detector = ChangeDetector(
+            pseudonym_mgr=self.pseudonym_mgr,
+            host_pseudonym=self.host_pseudonym,
+        )
+        shop_log_path = getattr(self.config, "SHOP_LOG_PATH", "data/shop-api.log")
+        self.log_tailer = LogTailer(log_path=shop_log_path, guard=self)
+        self.policy_gate = PolicyGate(scrubber=self.scrubber)
+        self.last_checkpoint_time: float = 0.0
+        self.last_checkpoint: Optional[Checkpoint] = None
 
         # Network I/O counter baseline
         net = psutil.net_io_counters()
@@ -81,6 +129,57 @@ class GuardThinSlice:
         )
         self.pending_events.append(event)
         logger.info(f"Queued event: {category} for source {src} (severity={severity})")
+
+    def process_log_line(self, raw_line: str, source: str = "shop-api") -> Tuple[str, int]:
+        """
+        Processes an incoming log line:
+        1. Stores raw line locally in raw.db (never sent over the wire).
+        2. Masks secrets (AWS keys, JWTs, bearer tokens, passwords, cards).
+        3. Returns (scrubbed_line, redactions_count).
+        """
+        # Store in local raw.db with 24h retention
+        self.raw_store.store_raw_log(text=raw_line, source=source)
+
+        # Mask secrets in pipeline
+        scrubbed_line, count = self.scrubber.scrub_text(raw_line)
+        if count > 0:
+            self.emit_change_event(
+                category="secret_redacted",
+                source=self.service_pseudonyms.get(source, self.host_pseudonym),
+                severity="medium",
+            )
+        return scrubbed_line, count
+
+    def record_login(
+        self,
+        raw_username: str,
+        raw_ip: str,
+        success: bool,
+        timestamp: Optional[float] = None,
+    ) -> List[EventSample]:
+        """
+        Records a login attempt and enqueues triggered security events (honeypot, odd_hour, login_after_failures).
+        """
+        events = self.auth_detector.record_login(
+            raw_username=raw_username,
+            raw_ip=raw_ip,
+            success=success,
+            service_pseudonym=self.service_pseudonyms["shop-api"],
+            timestamp=timestamp,
+        )
+        self.pending_events.extend(events)
+        return events
+
+    def notify_shop_process(self, pid: int, create_time: float) -> Optional[EventSample]:
+        """Notifies guard of shop-api process identity to detect app_restarted events."""
+        event = self.change_detector.update_shop_process(
+            pid=pid,
+            create_time=create_time,
+            service_pseudonym=self.service_pseudonyms["shop-api"],
+        )
+        if event:
+            self.pending_events.append(event)
+        return event
 
     def _get_net_rates(self) -> Tuple[float, float]:
         """Calculates network inbound and outbound throughput in kilobits per second (kbps)."""
@@ -184,6 +283,9 @@ class GuardThinSlice:
         end_iso = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
         sent_iso = end_iso
 
+        # Tail and process new logs from shop-api (T3, T16)
+        self.log_tailer.process_pending_logs()
+
         # Read host metrics
         cpu_val = float(psutil.cpu_percent(interval=None))
         mem_val = float(psutil.virtual_memory().percent)
@@ -230,27 +332,48 @@ class GuardThinSlice:
                 avg=service_up_val,
                 max=service_up_val,
             ),
-            MetricSample(
-                name="latency_ms",
-                source=self.host_pseudonym,
-                avg=latency_val,
-                max=latency_val,
-            ),
         ]
+        if service_up_val == 1.0:
+            metrics.append(
+                MetricSample(
+                    name="latency_ms",
+                    source=self.host_pseudonym,
+                    avg=latency_val,
+                    max=latency_val,
+                )
+            )
+
+        # Evaluate power & battery state (T19)
+        power_metrics, power_events = self.power_detector.check_power()
+        metrics.extend(power_metrics)
+        self.pending_events.extend(power_events)
+
+        # Evaluate auth bursts (30+ failures in 60s) (T9)
+        burst_events = self.auth_detector.evaluate_bursts(service_pseudonym=self.service_pseudonyms["shop-api"])
+        self.pending_events.extend(burst_events)
+
+        # Evaluate configuration changes (.env hash) (T13)
+        cfg_event = self.change_detector.check_config_changed()
+        if cfg_event:
+            self.pending_events.append(cfg_event)
+
+        # Plant canary every 30s into raw store (T5)
+        self.scrubber.maybe_plant_canary(raw_store=self.raw_store)
 
         # Guard process health
         proc = psutil.Process(os.getpid())
         guard_cpu = round(proc.cpu_percent(interval=None), 2)
         guard_mem = round(proc.memory_info().rss / (1024 * 1024), 2)
+        current_buffer_depth = self.outbox.get_buffer_depth()
 
         health = GuardHealth(
             guard_version=self.config.GUARD_VERSION,
             guard_cpu_pct=guard_cpu,
             guard_mem_mb=guard_mem,
-            buffer_depth=0,
+            buffer_depth=current_buffer_depth,
             config_ok=True,
-            canaries_planted=0,
-            secrets_redacted=0,
+            canaries_planted=self.scrubber.canaries_planted,
+            secrets_redacted=self.scrubber.secrets_redacted,
         )
 
         payload_id = str(uuid.uuid4())
@@ -284,14 +407,81 @@ class GuardThinSlice:
 
         # Serialize body to exact JSON bytes
         body_json = payload.model_dump_json(by_alias=True)
+
+        # Policy gate inspection: schema contract + canary/secret check (T4, T10)
+        valid, reason = self.policy_gate.inspect_payload(payload, body_json_str=body_json)
+        if not valid:
+            logger.critical(f"POLICY GATE VIOLATION: {reason}. Egress payload BLOCKED.")
+            raise ValueError(f"Pre-send policy violation: {reason}")
+
         body_bytes = body_json.encode("utf-8")
 
-        # Update hash chain and sequence for next cycle
-        sha256_hash = hashlib.sha256(body_bytes).hexdigest()
-        self.prev_hash = f"sha256:{sha256_hash}"
+        # Compute SHA-256 and chain
+        sha256_hash = f"sha256:{hashlib.sha256(body_bytes).hexdigest()}"
+
+        # Record to cryptographic ledger and queue in outbox (T11)
+        self.ledger.record_payload(
+            seq=payload.seq,
+            payload_id=payload.payload_id,
+            sha256=sha256_hash,
+            prev_hash=payload.prev_hash,
+            body=body_json,
+            status="pending",
+        )
+        self.outbox.enqueue(
+            seq=payload.seq,
+            payload_id=payload.payload_id,
+            sha256=sha256_hash,
+            body=body_json,
+        )
+
+        self.prev_hash = sha256_hash
         self.seq += 1
 
         return payload, body_bytes
+
+    def drain_outbox(
+        self,
+        client: Optional[httpx.Client] = None,
+        ignore_backoff: bool = False,
+    ) -> Tuple[int, int]:
+        """
+        Drains the outbox in oldest-first order (seq ASC) with backoff.
+        """
+        def _send(payload_id: str, body_bytes: bytes, client_obj: Optional[httpx.Client]):
+            try:
+                p_data = json.loads(body_bytes.decode("utf-8"))
+                sent_at = p_data.get("sent_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            except Exception:
+                sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+            headers = create_auth_headers(
+                guard_id=self.config.GUARD_ID,
+                body_bytes=body_bytes,
+                timestamp_iso=sent_at,
+                secret_key=self.config.GUARD_SECRET_KEY,
+            )
+            should_close = False
+            if client_obj is None:
+                client_obj = httpx.Client(timeout=self.config.TIMEOUT_SECONDS)
+                should_close = True
+            try:
+                resp = client_obj.post(
+                    self.config.REGION_URL,
+                    content=body_bytes,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return IngestReceipt.model_validate(data)
+            except Exception as exc:
+                logger.warning(f"Failed sending payload {payload_id} to {self.config.REGION_URL}: {exc}")
+                return None
+            finally:
+                if should_close:
+                    client_obj.close()
+
+        return self.outbox.drain(send_fn=_send, client=client, ignore_backoff=ignore_backoff)
 
     def send_payload(
         self,
@@ -300,47 +490,51 @@ class GuardThinSlice:
         client: Optional[httpx.Client] = None,
     ) -> Optional[IngestReceipt]:
         """
-        Sends payload to ingest endpoint with canonical X-Airlock-* headers and returns IngestReceipt.
+        Sends payload to ingest endpoint with canonical X-Airlock-* headers,
+        updates cryptographic ledger upon receipt, and returns IngestReceipt.
         """
-        headers = create_auth_headers(
-            guard_id=self.config.GUARD_ID,
-            body_bytes=body_bytes,
-            timestamp_iso=payload.sent_at,
-            secret_key=self.config.GUARD_SECRET_KEY,
-        )
-
-        should_close = False
-        if client is None:
-            client = httpx.Client(timeout=self.config.TIMEOUT_SECONDS)
-            should_close = True
-
-        try:
-            logger.info(
-                f"Sending payload seq={payload.seq - 1} id={payload.payload_id} to {self.config.REGION_URL}"
+        sha256_hash = f"sha256:{hashlib.sha256(body_bytes).hexdigest()}"
+        if not self.ledger.get_row(payload.payload_id):
+            self.ledger.record_payload(
+                seq=payload.seq,
+                payload_id=payload.payload_id,
+                sha256=sha256_hash,
+                prev_hash=payload.prev_hash,
+                body=body_bytes.decode("utf-8"),
+                status="pending",
             )
-            response = client.post(
-                self.config.REGION_URL,
-                content=body_bytes,
-                headers=headers,
+            self.outbox.enqueue(
+                seq=payload.seq,
+                payload_id=payload.payload_id,
+                sha256=sha256_hash,
+                body=body_bytes.decode("utf-8"),
             )
-            response.raise_for_status()
 
-            receipt_data = response.json()
-            receipt = IngestReceipt.model_validate(receipt_data)
-            logger.info(
-                f"Receipt received: payload_id={receipt.payload_id} status={receipt.status} sha256={receipt.sha256}"
+        # Drain outbox with provided client
+        self.drain_outbox(client=client, ignore_backoff=True)
+
+        row = self.ledger.get_row(payload.payload_id)
+        if row and row["status"] in ("stored", "duplicate"):
+            return IngestReceipt(
+                payload_id=row["payload_id"],
+                sha256=row["sha256"],
+                received_at=row["receipt_at"] or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                status=row["status"],
             )
-            return receipt
+        return None
 
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from Ingest: {e.response.status_code} - {e.response.text}")
-            return None
-        except httpx.RequestError as e:
-            logger.warning(f"Connection failed to {self.config.REGION_URL} ({e}). Payload buffered.")
-            return None
-        finally:
-            if should_close:
-                client.close()
+    def maybe_publish_checkpoint(self, now: Optional[float] = None) -> Optional[Checkpoint]:
+        """
+        Every 60s computes and publishes running SHA-256 checkpoint {guard_id, up_to_seq, root} (T14).
+        """
+        current_time = now if now is not None else time.time()
+        if self.last_checkpoint_time == 0.0 or (current_time - self.last_checkpoint_time) >= 60.0:
+            cp = self.ledger.compute_checkpoint(guard_id=self.config.GUARD_ID)
+            self.last_checkpoint_time = current_time
+            self.last_checkpoint = cp
+            logger.info(f"Published Checkpoint: guard_id={cp.guard_id} up_to_seq={cp.up_to_seq} root={cp.root}")
+            return cp
+        return None
 
 
 def run_loop(
@@ -356,15 +550,25 @@ def run_loop(
     )
     logger.info(f"Target regional ingest: {guard.config.REGION_URL}")
 
+    # Reusable probe client avoids ~350ms per-window TCP/TLS handshake overhead
+    probe_client = httpx.Client(timeout=1.0)
+    ingest_client = httpx.Client(timeout=guard.config.TIMEOUT_SECONDS)
+
     iteration = 0
     try:
         while max_iterations is None or iteration < max_iterations:
             time.sleep(interval)
-            payload, body_bytes = guard.collect_window(duration_seconds=interval)
-            guard.send_payload(payload, body_bytes)
+            payload, body_bytes = guard.collect_window(
+                duration_seconds=interval, probe_client=probe_client
+            )
+            guard.send_payload(payload, body_bytes, client=ingest_client)
+            guard.maybe_publish_checkpoint()
             iteration += 1
     except KeyboardInterrupt:
         logger.info("Guard stopped by operator.")
+    finally:
+        probe_client.close()
+        ingest_client.close()
 
 
 if __name__ == "__main__":
