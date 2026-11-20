@@ -1,0 +1,313 @@
+{
+  "$defs": {
+    "EventSample": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "enum": [
+            "auth_failure_burst",
+            "login_after_failures",
+            "honeypot_hit",
+            "odd_hour_login",
+            "service_down",
+            "new_log_pattern",
+            "log_pattern_spike",
+            "power_on_battery",
+            "secret_redacted",
+            "app_restarted",
+            "version_changed",
+            "config_changed",
+            "new_process"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "source": {
+          "pattern": "^(host|src|user|proc)-[0-9a-f]{8}$",
+          "title": "Source",
+          "type": "string"
+        },
+        "actor": {
+          "anyOf": [
+            {
+              "pattern": "^(host|src|user|proc)-[0-9a-f]{8}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Actor"
+        },
+        "count": {
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "window_s": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window S"
+        }
+      },
+      "required": [
+        "category",
+        "severity",
+        "source",
+        "count"
+      ],
+      "title": "EventSample",
+      "type": "object"
+    },
+    "GuardHealth": {
+      "additionalProperties": false,
+      "properties": {
+        "guard_version": {
+          "title": "Guard Version",
+          "type": "string"
+        },
+        "guard_cpu_pct": {
+          "title": "Guard Cpu Pct",
+          "type": "number"
+        },
+        "guard_mem_mb": {
+          "title": "Guard Mem Mb",
+          "type": "number"
+        },
+        "buffer_depth": {
+          "minimum": 0,
+          "title": "Buffer Depth",
+          "type": "integer"
+        },
+        "config_ok": {
+          "title": "Config Ok",
+          "type": "boolean"
+        },
+        "canaries_planted": {
+          "minimum": 0,
+          "title": "Canaries Planted",
+          "type": "integer"
+        },
+        "secrets_redacted": {
+          "minimum": 0,
+          "title": "Secrets Redacted",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "guard_version",
+        "guard_cpu_pct",
+        "guard_mem_mb",
+        "buffer_depth",
+        "config_ok",
+        "canaries_planted",
+        "secrets_redacted"
+      ],
+      "title": "GuardHealth",
+      "type": "object"
+    },
+    "LogPatternSample": {
+      "additionalProperties": false,
+      "properties": {
+        "pattern_id": {
+          "pattern": "^tpl-[0-9a-fA-F]+$",
+          "title": "Pattern Id",
+          "type": "string"
+        },
+        "level": {
+          "enum": [
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL"
+          ],
+          "title": "Level",
+          "type": "string"
+        },
+        "count": {
+          "minimum": 1,
+          "title": "Count",
+          "type": "integer"
+        },
+        "is_new": {
+          "default": false,
+          "title": "Is New",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pattern_id",
+        "level",
+        "count"
+      ],
+      "title": "LogPatternSample",
+      "type": "object"
+    },
+    "MetricSample": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "enum": [
+            "cpu_pct",
+            "mem_pct",
+            "disk_pct",
+            "net_in_kbps",
+            "net_out_kbps",
+            "latency_ms",
+            "packet_loss_pct",
+            "service_up",
+            "battery_pct",
+            "on_battery",
+            "battery_min_left"
+          ],
+          "title": "Name",
+          "type": "string"
+        },
+        "source": {
+          "pattern": "^(host|src|user|proc)-[0-9a-f]{8}$",
+          "title": "Source",
+          "type": "string"
+        },
+        "avg": {
+          "title": "Avg",
+          "type": "number"
+        },
+        "max": {
+          "title": "Max",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "source",
+        "avg",
+        "max"
+      ],
+      "title": "MetricSample",
+      "type": "object"
+    },
+    "TimeWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "title": "Start",
+          "type": "string"
+        },
+        "end": {
+          "title": "End",
+          "type": "string"
+        },
+        "source_tz": {
+          "title": "Source Tz",
+          "type": "string"
+        }
+      },
+      "required": [
+        "start",
+        "end",
+        "source_tz"
+      ],
+      "title": "TimeWindow",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "airlock.v1",
+      "default": "airlock.v1",
+      "title": "Schema",
+      "type": "string"
+    },
+    "payload_id": {
+      "title": "Payload Id",
+      "type": "string"
+    },
+    "tenant_id": {
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "guard_id": {
+      "title": "Guard Id",
+      "type": "string"
+    },
+    "seq": {
+      "minimum": 0,
+      "title": "Seq",
+      "type": "integer"
+    },
+    "prev_hash": {
+      "title": "Prev Hash",
+      "type": "string"
+    },
+    "policy_version": {
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "sent_at": {
+      "title": "Sent At",
+      "type": "string"
+    },
+    "window": {
+      "$ref": "#/$defs/TimeWindow"
+    },
+    "metrics": {
+      "items": {
+        "$ref": "#/$defs/MetricSample"
+      },
+      "title": "Metrics",
+      "type": "array"
+    },
+    "events": {
+      "items": {
+        "$ref": "#/$defs/EventSample"
+      },
+      "title": "Events",
+      "type": "array"
+    },
+    "log_patterns": {
+      "items": {
+        "$ref": "#/$defs/LogPatternSample"
+      },
+      "title": "Log Patterns",
+      "type": "array"
+    },
+    "health": {
+      "$ref": "#/$defs/GuardHealth"
+    }
+  },
+  "required": [
+    "payload_id",
+    "tenant_id",
+    "guard_id",
+    "seq",
+    "prev_hash",
+    "policy_version",
+    "sent_at",
+    "window",
+    "health"
+  ],
+  "title": "AirlockPayload",
+  "type": "object"
+}
