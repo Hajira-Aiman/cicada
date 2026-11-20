@@ -36,6 +36,22 @@ HEALTH_RANK = {"Excellent": 0, "Good": 1, "Fair": 2, "Poor": 3}
 iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# who depends on whom: a problem in the key lights up everything listed (transitively) as impacted
+DEPENDENTS = {"host": ["shop-api", "db"], "db": ["shop-api", "checkout"], "shop-api": ["login", "checkout"]}
+
+
+def damage_map(affected, dependents=DEPENDENTS):
+    """T9 damage map: affected components are red, their dependents amber, everything else green."""
+    hit, todo = set(), list(affected)
+    while todo:
+        for d in dependents.get(todo.pop(), []):
+            if d not in hit and d not in affected:
+                hit.add(d); todo.append(d)
+    nodes = {c for e in TOPOLOGY for c in e}
+    return {"nodes": [{"id": c, "state": "affected" if c in affected else "impacted" if c in hit else "ok"} for c in sorted(nodes)],
+            "edges": [{"from": a, "to": b} for a, b in TOPOLOGY]}
+
+
 def related(a, b, edges=TOPOLOGY):
     """True if components a and b are connected in the topology (or equal)."""
     if a == b:

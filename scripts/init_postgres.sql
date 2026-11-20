@@ -214,6 +214,8 @@ CREATE TABLE IF NOT EXISTS feedback (
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS aiops_damage_map (tenant_id text PRIMARY KEY, body jsonb, updated_at timestamptz);
+
 CREATE TABLE IF NOT EXISTS aiops_baselines (
     id BIGSERIAL PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL,
@@ -359,7 +361,7 @@ CREATE POLICY tenant_isolation_aiops_counters ON aiops_counters FOR ALL USING (
 GRANT CONNECT ON DATABASE airlock_in TO aiops_worker;
 GRANT USAGE ON SCHEMA public TO aiops_worker;
 GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
-GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT ALL PRIVILEGES ON aiops_baselines, aiops_damage_map, health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;
 
 -- Database 3: airlock_eu (Europe Region)
@@ -454,6 +456,8 @@ CREATE TABLE IF NOT EXISTS feedback (
     source VARCHAR(64),
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS aiops_damage_map (tenant_id text PRIMARY KEY, body jsonb, updated_at timestamptz);
 
 CREATE TABLE IF NOT EXISTS aiops_baselines (
     id BIGSERIAL PRIMARY KEY,
@@ -600,5 +604,5 @@ CREATE POLICY tenant_isolation_aiops_counters ON aiops_counters FOR ALL USING (
 GRANT CONNECT ON DATABASE airlock_eu TO aiops_worker;
 GRANT USAGE ON SCHEMA public TO aiops_worker;
 GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
-GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT ALL PRIVILEGES ON aiops_baselines, aiops_damage_map, health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;

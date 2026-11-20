@@ -63,9 +63,9 @@ class Baseline:
     def z(self, x, th):
         return None if self.n < th.warmup else (x - self.mean) / self.std()
 
-    def update(self, x, th):
+    def update(self, x, th, zf=None):
         z = self.z(x, th)
-        flagged = z is not None and abs(z) >= th.z_flag
+        flagged = z is not None and abs(z) >= (zf or th.z_flag)
         self.streak = self.streak + 1 if flagged else 0
         # ponytail: don't learn from anomalies, but re-learn after 30 flagged windows (60 s) so a new normal is accepted
         if not (flagged and self.streak <= 30):
@@ -94,6 +94,11 @@ class Engine:
     def __init__(self, thresholds_for=lambda tenant: Thresholds()):
         self.th = thresholds_for
         self.base, self.src = {}, {}
+        self.relaxed = {}   # (tenant, source, metric) -> epoch until which a thumbs-down raises the flag level
+
+    def thumbs_down(self, tenant, source, metric, now, minutes=30, bump=0.5):
+        """T9: a thumbs-down on an alert raises that signal's flag level by `bump` sigma for `minutes`."""
+        self.relaxed[(tenant, source, metric)] = (now + minutes * 60, bump)
 
     def ingest(self, tenant, source, ts, arrived, metrics: dict, events=()):
         """One window for one source. ts = event time, arrived = receive time (both epoch seconds)."""
@@ -103,7 +108,9 @@ class Engine:
         for name, v in metrics.items():
             st.last[name] = v
             if name in Z_METRICS:
-                st.z[name] = self.base.setdefault((tenant, source, name), Baseline()).update(v, th)
+                until, bump = self.relaxed.get((tenant, source, name), (0, 0))
+                st.z[name] = self.base.setdefault((tenant, source, name), Baseline()).update(
+                    v, th, th.z_flag + bump if arrived < until else None)
         for cat, sev, *rest in events:  # optional extras: count, actor pseudonym
             st.events[cat] = (ts, sev, rest[0] if rest else 1, rest[1] if len(rest) > 1 else None)
 

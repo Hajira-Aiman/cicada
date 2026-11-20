@@ -32,6 +32,7 @@ from hq.db import (
     get_action_audit_logs,
     get_action_intent,
     get_tenant_assigned_region,
+    get_damage_map,
     get_tenant_baselines,
     get_tenant_counters,
     init_all_databases,
@@ -638,6 +639,13 @@ def get_baselines_endpoint(
     if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=403, detail="Access denied to tenant baselines")
     return get_tenant_baselines(tenant_id)
+
+
+@app.get("/api/damage-map/{tenant_id}")
+def get_damage_map_endpoint(tenant_id: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Access denied to tenant damage map")
+    return get_damage_map(tenant_id)
 
 
 class ChatRequest(BaseModel):

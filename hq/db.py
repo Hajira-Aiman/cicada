@@ -274,6 +274,7 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 source TEXT,
                 at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS aiops_damage_map (tenant_id TEXT PRIMARY KEY, body TEXT, updated_at TEXT);
             CREATE TABLE IF NOT EXISTS aiops_baselines (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 tenant_id TEXT NOT NULL,
@@ -1312,6 +1313,18 @@ def get_tenant_baselines(tenant_id: str) -> List[Dict[str, Any]]:
         ]
     except Exception:
         return []
+
+
+def get_damage_map(tenant_id: str) -> Dict[str, Any]:
+    """Topology with affected/impacted/ok per component, written by the AIOps worker (T9)."""
+    db_name = "airlock_in" if (get_tenant_assigned_region(tenant_id) or "in") == "in" else "airlock_eu"
+    q = "SELECT body FROM aiops_damage_map WHERE tenant_id = " + ("%s;" if is_postgres_available() else "?;")
+    try:
+        rows = execute_query(db_name, q, (tenant_id,), tenant_id=tenant_id)
+        body = rows[0]["body"] if rows else None
+        return json.loads(body) if isinstance(body, str) else (body or {"nodes": [], "edges": []})
+    except Exception:
+        return {"nodes": [], "edges": []}
 
 
 def get_tenant_counters(tenant_id: str) -> Dict[str, Any]:

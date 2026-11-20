@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import psycopg
 from hq.aiops.engine import Engine, Thresholds
 from hq.aiops.anomaly import Detector
-from hq.aiops.incidents import Manager
+from hq.aiops.incidents import Manager, COMPONENT, damage_map
 from hq.ai.assistant import deterministic_narrative, llm_narrative
 import os
 from dotenv import load_dotenv
@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS health_history(id bigserial PRIMARY KEY, tenant_id te
 CREATE TABLE IF NOT EXISTS health_current(tenant_id text, source text, state text, reasons jsonb, since timestamptz, flaps_prevented int, updated timestamptz, PRIMARY KEY(tenant_id, source));
 CREATE TABLE IF NOT EXISTS aiops_counters(tenant_id text PRIMARY KEY, raw_alerts int, incidents int, noise_cut_pct real, flaps_prevented int, updated timestamptz);
 CREATE TABLE IF NOT EXISTS tenant_thresholds(tenant_id text PRIMARY KEY, config jsonb);
+CREATE TABLE IF NOT EXISTS aiops_damage_map(tenant_id text PRIMARY KEY, body jsonb, updated_at timestamptz);
 """
 iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 REPLAY_S = 300  # on start, rebuild baselines from the last 5 minutes
@@ -62,6 +63,7 @@ class Region:
         self.engine = Engine(lambda tenant: Thresholds.with_overrides(self.overrides.get(tenant)))
         self.detector = Detector(self.engine)
         self.manager = Manager(self.engine, self.detector)
+        self.last_write = 0.0
         self.narrator = Narrator("airlock_" + name)
         self.db = psycopg.connect(dsn("airlock_" + name), autocommit=True)
         for stmt in filter(None, (x.strip() for x in SCHEMA.split(";"))):
@@ -74,6 +76,28 @@ class Region:
 
     def load_overrides(self):
         self.overrides.update({t: c for t, c in self.db.execute("SELECT tenant_id, config FROM tenant_thresholds")})
+
+    def load_feedback(self, now):
+        """T9: new thumbs-downs raise that signal's flag level (3 -> 3.5 sigma) for 30 minutes."""
+        for t, src, metric, at in self.db.execute("SELECT tenant_id, source, metric, extract(epoch from at) FROM feedback "
+                                                  "WHERE metric IS NOT NULL AND source IS NOT NULL AND at > now() - interval '30 minutes'"):
+            if (t, src, metric) not in self.engine.relaxed:
+                self.engine.thumbs_down(t, src, metric, float(at))
+                log.info("thumbs-down on %s/%s/%s: flag level 3.5 until %s", t, src, metric, iso(float(at) + 1800))
+
+    def write_baselines_and_map(self, now):
+        by = {}
+        for (t, s, name), b in self.engine.base.items():
+            if b.n >= self.engine.th(t).warmup:
+                by.setdefault(t, []).append((s, name, round(b.mean, 3), round(b.std(), 3)))
+        for t in {t for (t, _s) in self.engine.src}:
+            with self.db.transaction():
+                self.db.execute("DELETE FROM aiops_baselines WHERE tenant_id=%s", (t,))
+                for r in by.get(t, []):
+                    self.db.execute("INSERT INTO aiops_baselines(tenant_id,source,metric,mean,std) VALUES(%s,%s,%s,%s,%s)", (t, *r))
+            hit = {COMPONENT.get(f["name"], "host") for f in self.detector.flags(t) + self.detector.errors(t, now)}
+            self.db.execute("""INSERT INTO aiops_damage_map VALUES(%s,%s,now()) ON CONFLICT(tenant_id) DO UPDATE SET body=EXCLUDED.body, updated_at=now()""",
+                            (t, json.dumps(damage_map(hit))))
 
     def fetch(self):
         """New windows since the cursor, grouped per (tenant, source, window) and sorted by event time."""
@@ -96,6 +120,7 @@ class Region:
 
     def tick(self, now, replay=False):
         self.load_overrides()
+        self.load_feedback(now)
         for (ts, t, s), w in self.fetch():
             self.engine.ingest(t, s, ts, w["arr"], w["m"], w["e"])
             self.detector.observe(t, s)
@@ -105,6 +130,9 @@ class Region:
             self.db.execute("INSERT INTO health_history(tenant_id,source,state,old_state,reasons,at) VALUES(%s,%s,%s,%s,%s,%s)",
                             (c.tenant_id, c.source, c.state, c.old_state, json.dumps(c.reasons), c.at))
             log.info("%s %s %s -> %s %s", c.at, c.source, c.old_state, c.state, c.reasons)
+        if now - self.last_write >= 5:
+            self.last_write = now
+            self.write_baselines_and_map(now)
         for kind, a in self.detector.step(now):
             body = {"kind": a.kind, "signals": a.signals, "second_opinion": a.second_opinion, "agrees": a.agrees,
                     "started_at": iso(a.started), "last_flag_at": iso(a.last_flag), "suppressed_reason": a.suppressed_reason}

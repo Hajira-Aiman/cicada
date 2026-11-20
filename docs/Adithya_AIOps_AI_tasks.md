@@ -145,8 +145,8 @@ contribution % and the confidence formula. Write incidents in the contract shape
 - **Done when:** the Backup job button alerts 3 times and then is labelled a scheduled job; Restart app followed by latency shows the change line.
 
 #### T9. Feedback + damage map · PRD #24, §Differentiators
-- [ ] 👎 on an alert raises that signal's flag level from 3 to 3.5 for 30 min, logged with who and when.
-- [ ] Small topology map per tenant, so the damage map lights up affected parts (website, login, checkout).
+- [x] 👎 on an alert raises that signal's flag level from 3 to 3.5 for 30 min, logged with who and when.
+- [x] Small topology map per tenant, so the damage map lights up affected parts (website, login, checkout).
 - **Done when:** a 👎 stops repeats of that alert, and a database slowdown lights its dependents.
 
 #### T10. Head-office AI + narratives · PRD #21, §AI assistants
