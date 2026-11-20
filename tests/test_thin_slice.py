@@ -24,36 +24,42 @@ def clean_received_payloads():
 
 
 def test_thin_slice_collection_and_signing():
+    healthy_app = FastAPI()
+    @healthy_app.get("/health")
+    def _ok():
+        return {"status": "ok"}
+
     guard = GuardThinSlice()
-    payload, body_bytes = guard.collect_window(duration_seconds=2.0)
+    with TestClient(healthy_app) as client:
+        payload, body_bytes = guard.collect_window(duration_seconds=2.0, probe_client=client)
 
-    # Assert basic envelope properties
-    assert payload.schema_version == "airlock.v1"
-    assert payload.tenant_id == "acme"
-    assert payload.guard_id == "guard-acme-01"
-    assert payload.seq == 1
-    assert payload.prev_hash == "GENESIS"
-    assert payload.window.source_tz == "Asia/Kolkata"
+        # Assert basic envelope properties
+        assert payload.schema_version == "airlock.v1"
+        assert payload.tenant_id == "acme"
+        assert payload.guard_id == "guard-acme-01"
+        assert payload.seq == 1
+        assert payload.prev_hash == "GENESIS"
+        assert payload.window.source_tz == "Asia/Kolkata"
 
-    # Assert required metrics: cpu_pct, mem_pct, disk_pct, net_in_kbps, net_out_kbps, service_up, latency_ms
-    metric_names = [m.name for m in payload.metrics]
-    assert "cpu_pct" in metric_names
-    assert "mem_pct" in metric_names
-    assert "disk_pct" in metric_names
-    assert "net_in_kbps" in metric_names
-    assert "net_out_kbps" in metric_names
-    assert "service_up" in metric_names
-    assert "latency_ms" in metric_names
+        # Assert required metrics: cpu_pct, mem_pct, disk_pct, net_in_kbps, net_out_kbps, service_up, latency_ms
+        metric_names = [m.name for m in payload.metrics]
+        assert "cpu_pct" in metric_names
+        assert "mem_pct" in metric_names
+        assert "disk_pct" in metric_names
+        assert "net_in_kbps" in metric_names
+        assert "net_out_kbps" in metric_names
+        assert "service_up" in metric_names
+        assert "latency_ms" in metric_names
 
-    # Check metric values are valid floats
-    for m in payload.metrics:
-        assert isinstance(m.avg, (float, int))
-        assert isinstance(m.max, (float, int))
+        # Check metric values are valid floats
+        for m in payload.metrics:
+            assert isinstance(m.avg, (float, int))
+            assert isinstance(m.max, (float, int))
 
-    # Next window increments seq and chains hash
-    p2, b2 = guard.collect_window(duration_seconds=2.0)
-    assert p2.seq == 2
-    assert p2.prev_hash.startswith("sha256:")
+        # Next window increments seq and chains hash
+        p2, b2 = guard.collect_window(duration_seconds=2.0, probe_client=client)
+        assert p2.seq == 2
+        assert p2.prev_hash.startswith("sha256:")
 
 
 def test_real_probe_service_up_and_service_down():
@@ -72,6 +78,7 @@ def test_real_probe_service_up_and_service_down():
         p, _ = guard.collect_window(probe_client=client)
         m_map = {m.name: m.avg for m in p.metrics}
         assert m_map["service_up"] == 1.0
+        assert "latency_ms" in m_map
         # No service_down event should be present
         events = [e.category for e in p.events]
         assert "service_down" not in events
@@ -90,8 +97,67 @@ def test_real_probe_service_up_and_service_down():
         p_err, _ = guard_err.collect_window(probe_client=client)
         m_map_err = {m.name: m.avg for m in p_err.metrics}
         assert m_map_err["service_up"] == 0.0
+        # No latency_ms when service is down
+        assert "latency_ms" not in m_map_err
         events_err = [e.category for e in p_err.events]
         assert "service_down" in events_err
+
+
+def test_reused_client_low_latency_and_down_behavior():
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from guard.config import GuardConfig
+
+    class MockHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, format, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), MockHandler)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        cfg = GuardConfig()
+        cfg.SHOP_HEALTH_URL = f"http://127.0.0.1:{port}/health"
+        guard = GuardThinSlice(cfg=cfg)
+
+        with httpx.Client(timeout=1.0) as client:
+            # First request warms connection
+            guard.probe_shop_health(client=client)
+
+            # Reused client latency against local test server: must be < 100 ms
+            up, latency = guard.probe_shop_health(client=client)
+            assert up == 1.0
+            assert latency < 100.0, f"Expected reused client latency < 100 ms, got {latency} ms"
+
+            # Check window includes latency_ms
+            p_up, _ = guard.collect_window(probe_client=client)
+            m_up = {m.name: m.avg for m in p_up.metrics}
+            assert m_up["service_up"] == 1.0
+            assert "latency_ms" in m_up
+            assert m_up["latency_ms"] < 100.0
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    # Now the server is down: probe fails
+    p_down, _ = guard.collect_window()
+    m_down = {m.name: m.avg for m in p_down.metrics}
+    assert m_down["service_up"] == 0.0
+    # Crucial: when server is down, latency_ms MUST NOT be sent
+    assert "latency_ms" not in m_down
+    assert any(e.category == "service_down" for e in p_down.events)
 
 
 def test_thin_slice_change_event_emission():

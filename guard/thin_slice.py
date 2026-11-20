@@ -230,13 +230,16 @@ class GuardThinSlice:
                 avg=service_up_val,
                 max=service_up_val,
             ),
-            MetricSample(
-                name="latency_ms",
-                source=self.host_pseudonym,
-                avg=latency_val,
-                max=latency_val,
-            ),
         ]
+        if service_up_val == 1.0:
+            metrics.append(
+                MetricSample(
+                    name="latency_ms",
+                    source=self.host_pseudonym,
+                    avg=latency_val,
+                    max=latency_val,
+                )
+            )
 
         # Guard process health
         proc = psutil.Process(os.getpid())
@@ -356,15 +359,24 @@ def run_loop(
     )
     logger.info(f"Target regional ingest: {guard.config.REGION_URL}")
 
+    # Reusable probe client avoids ~350ms per-window TCP/TLS handshake overhead
+    probe_client = httpx.Client(timeout=1.0)
+    ingest_client = httpx.Client(timeout=guard.config.TIMEOUT_SECONDS)
+
     iteration = 0
     try:
         while max_iterations is None or iteration < max_iterations:
             time.sleep(interval)
-            payload, body_bytes = guard.collect_window(duration_seconds=interval)
-            guard.send_payload(payload, body_bytes)
+            payload, body_bytes = guard.collect_window(
+                duration_seconds=interval, probe_client=probe_client
+            )
+            guard.send_payload(payload, body_bytes, client=ingest_client)
             iteration += 1
     except KeyboardInterrupt:
         logger.info("Guard stopped by operator.")
+    finally:
+        probe_client.close()
+        ingest_client.close()
 
 
 if __name__ == "__main__":
