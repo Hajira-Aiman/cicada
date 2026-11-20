@@ -103,6 +103,17 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 is_paused INTEGER DEFAULT 0,
                 paused_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS reveal_requests (
+                request_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                pseudonym TEXT NOT NULL,
+                requested_by TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                requested_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                status TEXT DEFAULT 'pending',
+                decided_at TEXT,
+                decision_reason TEXT
+            );
             INSERT OR IGNORE INTO region_states (region, is_paused) VALUES ('in', 0), ('eu', 0);
             INSERT OR IGNORE INTO tenants (tenant_id, name, assigned_region, pinned_policy_hash) VALUES
                 ('acme', 'Acme Shop A', 'in', 'sha256:v1-default-policy'),
@@ -886,3 +897,224 @@ def get_guard_reconciliation(db_name: str, guard_id: str) -> Optional[Dict[str, 
             r["gaps"] = json.loads(r["gaps"])
         return r
     return None
+
+
+def compute_checkpoint_root(hashes: List[str]) -> str:
+    """Computes running SHA-256 root over payload hashes in sequence order."""
+    if not hashes:
+        return "sha256:" + hashlib.sha256(b"").hexdigest()
+    running = ""
+    for h in hashes:
+        running = hashlib.sha256((running + h).encode("utf-8")).hexdigest()
+    return f"sha256:{running}"
+
+
+def compute_guard_checkpoint(guard_id: str, up_to_seq: Optional[int] = None) -> Dict[str, Any]:
+    """Computes the running SHA-256 checkpoint root over received payload hashes in seq order."""
+    guard_rec = lookup_guard(guard_id)
+    if not guard_rec:
+        return {"guard_id": guard_id, "up_to_seq": 0, "root": "sha256:" + hashlib.sha256(b"").hexdigest(), "hashes": []}
+
+    tenant_id = guard_rec["tenant_id"]
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+
+    query = """
+        SELECT p.seq, r.sha256 
+        FROM payloads p 
+        JOIN receipts r ON p.payload_id = r.payload_id 
+        WHERE p.guard_id = %s 
+        ORDER BY p.seq ASC;
+    """ if is_postgres_available() else """
+        SELECT p.seq, r.sha256 
+        FROM payloads p 
+        JOIN receipts r ON p.payload_id = r.payload_id 
+        WHERE p.guard_id = ? 
+        ORDER BY p.seq ASC;
+    """
+    rows = execute_query(db_name, query, (guard_id,))
+    seq_hash_map = {int(r["seq"]): r["sha256"] for r in rows}
+
+    max_seq = up_to_seq if up_to_seq is not None else (max(seq_hash_map.keys()) if seq_hash_map else 0)
+    ordered_hashes = []
+    for s in range(1, max_seq + 1):
+        ordered_hashes.append(seq_hash_map.get(s, ""))
+
+    root = compute_checkpoint_root(ordered_hashes)
+    return {
+        "guard_id": guard_id,
+        "up_to_seq": max_seq,
+        "root": root,
+        "hashes": ordered_hashes,
+        "seq_map": seq_hash_map,
+    }
+
+
+def compare_guard_checkpoint(
+    guard_id: str,
+    up_to_seq: int,
+    guard_root: str,
+    guard_hashes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Compares head office's running SHA-256 root against guard's checkpoint and names first differing seq."""
+    hq_chk = compute_guard_checkpoint(guard_id, up_to_seq=up_to_seq)
+    hq_root = hq_chk["root"]
+    match = (hq_root == guard_root)
+
+    first_diff_seq = None
+    if not match:
+        if guard_hashes and len(guard_hashes) > 0:
+            for idx, g_h in enumerate(guard_hashes):
+                hq_h = hq_chk["hashes"][idx] if idx < len(hq_chk["hashes"]) else ""
+                if g_h != hq_h:
+                    first_diff_seq = idx + 1
+                    break
+            if first_diff_seq is None:
+                first_diff_seq = len(guard_hashes) + 1
+        else:
+            # Check for gaps or missing seqs at HQ
+            seq_map = hq_chk["seq_map"]
+            for s in range(1, up_to_seq + 1):
+                if s not in seq_map:
+                    first_diff_seq = s
+                    break
+            if first_diff_seq is None:
+                first_diff_seq = up_to_seq
+
+    log_audit_event(
+        actor=guard_id,
+        action="checkpoint_verified" if match else "checkpoint_mismatch",
+        details={
+            "guard_id": guard_id,
+            "up_to_seq": up_to_seq,
+            "match": match,
+            "first_differing_seq": first_diff_seq,
+        },
+    )
+
+    return {
+        "guard_id": guard_id,
+        "up_to_seq": up_to_seq,
+        "match": match,
+        "status": "verified" if match else "mismatch",
+        "hq_root": hq_root,
+        "guard_root": guard_root,
+        "first_differing_seq": first_diff_seq,
+    }
+
+
+def create_reveal_request(
+    tenant_id: str,
+    pseudonym: str,
+    requested_by: str,
+    reason: str,
+    request_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Creates a new reveal request in airlock_core and logs an audit event."""
+    req_id = request_id or f"rev-{uuid.uuid4().hex[:12]}"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reveal_requests (request_id, tenant_id, pseudonym, requested_by, reason, requested_at, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+                    ON CONFLICT (request_id) DO NOTHING;
+                    """,
+                    (req_id, tenant_id, pseudonym, requested_by, reason, now_iso),
+                )
+            conn.commit()
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR IGNORE INTO reveal_requests (request_id, tenant_id, pseudonym, requested_by, reason, requested_at, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending');
+        """,
+        (req_id, tenant_id, pseudonym, requested_by, reason, now_iso),
+    )
+    conn_sq.commit()
+
+    log_audit_event(
+        actor=requested_by,
+        action="reveal_requested",
+        tenant_id=tenant_id,
+        details={"request_id": req_id, "pseudonym": pseudonym, "reason": reason},
+    )
+
+    return {
+        "request_id": req_id,
+        "tenant_id": tenant_id,
+        "pseudonym": pseudonym,
+        "requested_by": requested_by,
+        "reason": reason,
+        "requested_at": now_iso,
+        "status": "pending",
+    }
+
+
+def list_reveal_requests(tenant_id: Optional[str] = None, status: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Lists reveal requests filtered by tenant and status."""
+    query = "SELECT request_id, tenant_id, pseudonym, requested_by, reason, requested_at, status, decided_at, decision_reason FROM reveal_requests WHERE 1=1"
+    params = []
+    if tenant_id and tenant_id != "all":
+        query += " AND tenant_id = %s" if is_postgres_available() else " AND tenant_id = ?"
+        params.append(tenant_id)
+    if status:
+        query += " AND status = %s" if is_postgres_available() else " AND status = ?"
+        params.append(status)
+    query += " ORDER BY requested_at DESC;"
+    return execute_query("airlock_core", query, tuple(params))
+
+
+def update_reveal_request_status(
+    request_id: str,
+    status: str,
+    decided_by: str = "guard",
+    decision_reason: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Updates a reveal request's status (approved/rejected) and logs audit on decision."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE reveal_requests 
+                    SET status = %s, decided_at = %s, decision_reason = %s
+                    WHERE request_id = %s;
+                    """,
+                    (status, now_iso, decision_reason, request_id),
+                )
+            conn.commit()
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        UPDATE reveal_requests 
+        SET status = ?, decided_at = ?, decision_reason = ?
+        WHERE request_id = ?;
+        """,
+        (status, now_iso, decision_reason, request_id),
+    )
+    conn_sq.commit()
+
+    log_audit_event(
+        actor=decided_by,
+        action=f"reveal_{status}",
+        details={"request_id": request_id, "status": status, "decision_reason": decision_reason},
+    )
+
+    rows = execute_query(
+        "airlock_core",
+        "SELECT * FROM reveal_requests WHERE request_id = %s;" if is_postgres_available() else "SELECT * FROM reveal_requests WHERE request_id = ?;",
+        (request_id,),
+    )
+    return rows[0] if rows else None

@@ -50,6 +50,18 @@ CREATE TABLE IF NOT EXISTS region_states (
     paused_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS reveal_requests (
+    request_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    pseudonym VARCHAR(64) NOT NULL,
+    requested_by VARCHAR(128) NOT NULL,
+    reason TEXT NOT NULL,
+    requested_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    status VARCHAR(32) DEFAULT 'pending',
+    decided_at TIMESTAMP WITH TIME ZONE,
+    decision_reason TEXT
+);
+
 INSERT INTO region_states (region, is_paused) VALUES ('in', FALSE), ('eu', FALSE)
 ON CONFLICT (region) DO NOTHING;
 

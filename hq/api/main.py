@@ -18,11 +18,16 @@ from pydantic import BaseModel
 from hq.api.broadcaster import broadcaster
 from hq.db import (
     authenticate_user,
+    compare_guard_checkpoint,
+    compute_guard_checkpoint,
+    create_reveal_request,
     execute_query,
     init_all_databases,
     is_region_paused,
+    list_reveal_requests,
     log_audit_event,
     set_region_paused,
+    update_reveal_request_status,
     verify_session_token,
 )
 
@@ -204,6 +209,76 @@ def get_region_status(region: str):
     if region not in ("in", "eu"):
         raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
     return {"region": region, "is_paused": is_region_paused(region)}
+
+
+class CompareCheckpointRequest(BaseModel):
+    guard_id: str
+    up_to_seq: int
+    root: str
+    hashes: Optional[List[str]] = None
+
+
+@app.get("/api/checkpoints/{guard_id}")
+def get_checkpoint_for_guard(guard_id: str, up_to_seq: Optional[int] = None, user: Dict[str, Any] = Depends(get_current_user)):
+    return compute_guard_checkpoint(guard_id, up_to_seq=up_to_seq)
+
+
+@app.post("/api/checkpoints/compare")
+def compare_checkpoint(req: CompareCheckpointRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    return compare_guard_checkpoint(
+        guard_id=req.guard_id,
+        up_to_seq=req.up_to_seq,
+        guard_root=req.root,
+        guard_hashes=req.hashes,
+    )
+
+
+class CreateRevealRequest(BaseModel):
+    pseudonym: str
+    reason: str
+    tenant_id: Optional[str] = None
+    request_id: Optional[str] = None
+
+
+class DecisionRevealRequest(BaseModel):
+    status: str
+    decision_reason: Optional[str] = None
+
+
+@app.post("/reveal-requests")
+@app.post("/api/reveal-requests")
+def post_reveal_request(req: CreateRevealRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
+    requested_by = (user.get("user_id") if user else "analyst") or "analyst"
+    return create_reveal_request(
+        tenant_id=tenant_id,
+        pseudonym=req.pseudonym,
+        requested_by=requested_by,
+        reason=req.reason,
+        request_id=req.request_id,
+    )
+
+
+@app.get("/reveal-requests")
+@app.get("/api/reveal-requests")
+def get_reveal_requests(status: Optional[str] = None, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    tenant_id = user.get("tenant_id") if (user and user.get("role") == "customer") else None
+    return {"reveal_requests": list_reveal_requests(tenant_id=tenant_id, status=status)}
+
+
+@app.post("/reveal-requests/{request_id}/decision")
+@app.post("/api/reveal-requests/{request_id}/decision")
+def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    decided_by = user.get("user_id", "shop-manager") if user else "shop-manager"
+    updated = update_reveal_request_status(
+        request_id=request_id,
+        status=req.status,
+        decided_by=decided_by,
+        decision_reason=req.decision_reason,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Reveal request not found")
+    return updated
 
 
 @app.websocket("/ws/live")
