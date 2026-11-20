@@ -1,0 +1,63 @@
+{
+  "schema": "airlock.v1",
+  "payload_id": "0193f2c2-8c6f-7d4b-a021-5cf3b2e1d0f2",
+  "tenant_id": "acme",
+  "guard_id": "guard-acme-01",
+  "seq": 42,
+  "prev_hash": "sha256:11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+  "policy_version": "sha256:ab12cd34ef56",
+  "sent_at": "2026-11-21T04:15:30Z",
+  "window": {
+    "start": "2026-11-21T04:15:26Z",
+    "end": "2026-11-21T04:15:28Z",
+    "source_tz": "Asia/Kolkata"
+  },
+  "metrics": [
+    {
+      "name": "cpu_pct",
+      "source": "host-7f3a1234",
+      "avg": 78.4,
+      "max": 96.0
+    },
+    {
+      "name": "latency_ms",
+      "source": "host-7f3a1234",
+      "avg": 185.0,
+      "max": 310.0
+    }
+  ],
+  "events": [
+    {
+      "category": "auth_failure_burst",
+      "severity": "high",
+      "source": "host-7f3a1234",
+      "actor": "src-9c2e5678",
+      "count": 50,
+      "window_s": 60
+    },
+    {
+      "category": "secret_redacted",
+      "severity": "medium",
+      "source": "host-7f3a1234",
+      "count": 3,
+      "window_s": 2
+    }
+  ],
+  "log_patterns": [
+    {
+      "pattern_id": "tpl-3fa1",
+      "level": "ERROR",
+      "count": 50,
+      "is_new": true
+    }
+  ],
+  "health": {
+    "guard_version": "0.3.1",
+    "guard_cpu_pct": 2.4,
+    "guard_mem_mb": 76.5,
+    "buffer_depth": 0,
+    "config_ok": true,
+    "canaries_planted": 8,
+    "secrets_redacted": 3
+  }
+}

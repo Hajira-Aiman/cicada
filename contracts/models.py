@@ -200,3 +200,48 @@ class WSMessage(BaseModel):
     tenant_id: str
     timestamp: str  # ISO-8601 UTC with Z
     payload: dict
+
+
+class HealthChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tenant_id: str
+    source: str
+    state: str
+    old_state: Optional[str] = None
+    reasons: List[str]
+    at: str  # UTC ISO-8601 Z
+
+
+class Signal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evidence_id: str
+    name: str
+    value: float
+    baseline: float
+    z: Optional[float] = None
+    contribution_pct: float
+
+
+class Recommendation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["kill_process", "block_source", "block_ip", "restart_service", "investigate"]
+    target: Optional[str] = None
+    why: str
+    risk: Literal["low", "medium", "high"]
+    reversible: bool
+    rollback: Optional[str] = None
+
+
+# Cross-branch contract aliases
+PayloadV1 = AirlockPayload
+Payload = AirlockPayload
+SignedReceipt = IngestReceipt
+WindowInfo = TimeWindow
+Window = TimeWindow
+MetricItem = MetricSample
+Metric = MetricSample
+EventItem = EventSample
+Event = EventSample
+LogPatternItem = LogPatternSample
+LogPattern = LogPatternSample
+HealthInfo = GuardHealth
