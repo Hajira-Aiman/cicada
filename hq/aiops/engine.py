@@ -104,8 +104,8 @@ class Engine:
             st.last[name] = v
             if name in Z_METRICS:
                 st.z[name] = self.base.setdefault((tenant, source, name), Baseline()).update(v, th)
-        for cat, sev, *cnt in events:  # optional 3rd item = event count
-            st.events[cat] = (ts, sev, cnt[0] if cnt else 1)
+        for cat, sev, *rest in events:  # optional extras: count, actor pseudonym
+            st.events[cat] = (ts, sev, rest[0] if rest else 1, rest[1] if len(rest) > 1 else None)
 
     def raw(self, tenant, source, now):
         """Instant health from current data, before hysteresis. Returns (state, reasons, immediate)."""
@@ -119,7 +119,7 @@ class Engine:
         v = st.last
         if v.get("service_up", 1) < 1:
             poor.append("service down")
-        for cat, (ts, sev, _cnt) in st.events.items():
+        for cat, (ts, sev, _cnt, _actor) in st.events.items():
             if now - ts > th.event_hold_s:
                 continue
             if cat == "service_down":

@@ -125,12 +125,12 @@ contribution % and the confidence formula. Write incidents in the contract shape
 ### H15–H20 · Intelligence + extras
 
 #### T7. Kill-chain rule · PRD #14, §Differentiators › Kill-chain story
-- [ ] `auth_failure_burst` → `login_after_failures` or `odd_hour_login` → CPU anomaly → `net_out_kbps` anomaly, all within 10 min = one critical incident, "Possible compromise: cryptomining".
+- [x] `auth_failure_burst` → `login_after_failures` or `odd_hour_login` → CPU anomaly → `net_out_kbps` anomaly, all within 10 min = one critical incident, "Possible compromise: cryptomining".
 - **Done when:** the kill-chain button turns 4 alerts into 1 incident with the reasoning path.
 
 #### T8. Counterfactual + runbook + learned extras · PRD #14, #26, #27, §Safe remediation
-- [ ] **Counterfactual:** re-run the health rule without each signal, e.g. "If latency had stayed normal, this would be Fair, not Poor".
-- [ ] **Runbook:**
+- [x] **Counterfactual:** re-run the health rule without each signal, e.g. "If latency had stayed normal, this would be Fair, not Poor".
+- [x] **Runbook:**
 
 | Incident type | Recommended action |
 |---|---|
@@ -140,8 +140,8 @@ contribution % and the confidence formula. Write incidents in the contract shape
 | Latency / loss | Recommend investigation only |
 
   Each recommendation carries why, risk, reversible and rollback.
-- [ ] **Learned scheduled jobs (PRD #26):** keep the gaps between spikes per source and metric. Three gaps within ±10 % = a learned interval. Spikes on that schedule → `info: scheduled job (every ~60 s)`, suppressed with the reason shown. Off-schedule or larger spikes still alert.
-- [ ] **What changed just before (PRD #27):** change events within 5 min before an incident's first signal are attached ("started 40 s after shop-api restarted") and add 0.1 to confidence.
+- [x] **Learned scheduled jobs (PRD #26):** keep the gaps between spikes per source and metric. Three gaps within ±10 % = a learned interval. Spikes on that schedule → `info: scheduled job (every ~60 s)`, suppressed with the reason shown. Off-schedule or larger spikes still alert.
+- [x] **What changed just before (PRD #27):** change events within 5 min before an incident's first signal are attached ("started 40 s after shop-api restarted") and add 0.1 to confidence.
 - **Done when:** the Backup job button alerts 3 times and then is labelled a scheduled job; Restart app followed by latency shows the change line.
 
 #### T9. Feedback + damage map · PRD #24, §Differentiators

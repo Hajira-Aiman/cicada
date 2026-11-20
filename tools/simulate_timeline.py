@@ -1,4 +1,4 @@
-"""Fake guards posting valid, HMAC-signed airlock.v1 payloads every 2 s.
+﻿"""Fake guards posting valid, HMAC-signed airlock.v1 payloads every 2 s.
   python -m tools.simulate_timeline --tenants acme globex contoso --scenario cpu_spike:10:20 --scenario outage:40:15
 Scenario format name[:after_s[:for_s]]; repeat --scenario. Names: cpu_spike latency login_burst outage
 duplicates out_of_order kill_chain backup_job restart_app."""
@@ -46,7 +46,7 @@ def build(tenant, seq, prev_hash, win_start, scns, now):
             m["latency_ms"] = r(450, 30); m["packet_loss_pct"] = abs(r(3, .3))
         elif s.name == "login_burst":
             ev.append(dict(category="auth_failure_burst", severity="high", source=src, actor=ATTACKER, count=50, window_s=60))
-        elif s.name == "backup_job" and int(t) % 60 < 4:  # CPU spike every 60 s
+        elif s.name == "backup_job" and int(t) % 60 < 12:  # CPU spike every 60 s, 12 s long so it passes the 3-window flag rule
             m["cpu_pct"] = r(80, 2)
         elif s.name == "restart_app" and t < 2:
             ev.append(dict(category="app_restarted", severity="info", source=src))
@@ -57,10 +57,14 @@ def build(tenant, seq, prev_hash, win_start, scns, now):
                 ev.append(dict(category="login_after_failures", severity="high", source=src, actor=ATTACKER))
             elif t >= 12:
                 m["cpu_pct"] = r(96, 1); m["net_out_kbps"] = r(900, 30)
+                if t < 14:
+                    ev.append(dict(category="new_process", severity="medium", source=src, actor=pseudo("proc", "xmrig")))
+    for e in ev:
+        e.setdefault("count", 1); e.setdefault("window_s", 2)  # contract requires both
     metrics = [dict(name=k, source=src, avg=round(v, 2), max=round(v * 1.08, 2)) for k, v in m.items()]
     return Payload.model_validate({
         "schema": "airlock.v1", "payload_id": str(uuid.uuid4()), "tenant_id": tenant, "guard_id": TENANTS[tenant][0],
-        "seq": seq, "prev_hash": prev_hash, "policy_version": "sha256:sim", "sent_at": iso(datetime.now(timezone.utc)),
+        "seq": seq, "prev_hash": prev_hash, "policy_version": "sha256:ab1289cf001e35a9", "sent_at": iso(datetime.now(timezone.utc)),
         "window": {"start": iso(win_start), "end": iso(win_start + timedelta(seconds=2)), "source_tz": TENANTS[tenant][2]},
         "metrics": metrics, "events": ev,
         "health": {"guard_version": "sim-0.1", "guard_cpu_pct": 1.0, "guard_mem_mb": 80, "buffer_depth": 0, "config_ok": True, "canaries_planted": 0, "secrets_redacted": 0}})
@@ -79,7 +83,8 @@ async def post(client, tenant, body: bytes, host):
 
 
 async def guard(tenant, scns, host, interval):
-    seq, prev, last, held = 0, "sha256:genesis", None, []
+    seq, prev, last, held = 0, "GENESIS", None, []
+    deadline = time.time()
     async with httpx.AsyncClient() as c:
         while True:
             now = time.time(); seq += 1
@@ -103,7 +108,8 @@ async def guard(tenant, scns, host, interval):
                     await post(c, tenant, last, host); await post(c, tenant, body, host)
                 print(f"{iso(win)} {tenant} seq={seq} -> {st} {sorted(act) or ''}", flush=True)
             last = body
-            await asyncio.sleep(interval)
+            deadline += interval   # fixed cadence: posting time must not stretch the 2 s window
+            await asyncio.sleep(max(0.0, deadline - time.time()))
 
 
 async def main():

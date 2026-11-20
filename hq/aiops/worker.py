@@ -54,7 +54,7 @@ class Region:
                                          m.name, m.avg, p.received_at
                                   FROM metrics m JOIN payloads p USING(payload_id)
                                   WHERE p.received_at > %s AND p.received_at <= now() - interval '300 ms'""", (self.cursor,)).fetchall()
-        evs = self.db.execute("""SELECT e.tenant_id, e.source, extract(epoch from e.event_time), e.category, e.severity, e.count
+        evs = self.db.execute("""SELECT e.tenant_id, e.source, extract(epoch from e.event_time), e.category, e.severity, e.count, e.actor
                                  FROM events e JOIN payloads p USING(payload_id)
                                  WHERE p.received_at > %s AND p.received_at <= now() - interval '300 ms'""", (self.cursor,)).fetchall()
         win = {}
@@ -62,8 +62,8 @@ class Region:
             w = win.setdefault((float(ts), t, s), {"arr": 0.0, "m": {}, "e": []})
             w["arr"] = max(w["arr"], float(arr)); w["m"][name] = avg
             self.cursor = max(self.cursor, rcv)
-        for t, s, ts, cat, sev, cnt in evs:
-            win.setdefault((float(ts), t, s), {"arr": float(ts), "m": {}, "e": []})["e"].append((cat, sev, cnt))
+        for t, s, ts, cat, sev, cnt, actor in evs:
+            win.setdefault((float(ts), t, s), {"arr": float(ts), "m": {}, "e": []})["e"].append((cat, sev, cnt, actor))
         return [(k, win[k]) for k in sorted(win)]
 
     def tick(self, now, replay=False):
@@ -79,13 +79,13 @@ class Region:
             log.info("%s %s %s -> %s %s", c.at, c.source, c.old_state, c.state, c.reasons)
         for kind, a in self.detector.step(now):
             body = {"kind": a.kind, "signals": a.signals, "second_opinion": a.second_opinion, "agrees": a.agrees,
-                    "started_at": iso(a.started), "last_flag_at": iso(a.last_flag)}
+                    "started_at": iso(a.started), "last_flag_at": iso(a.last_flag), "suppressed_reason": a.suppressed_reason}
             self.db.execute("""INSERT INTO aiops_alerts(alert_id,tenant_id,source,title,severity,body,status,created_at,updated_at)
                                VALUES(%s,%s,%s,%s,%s,%s,%s,to_timestamp(%s),now())
                                ON CONFLICT(alert_id) DO UPDATE SET title=EXCLUDED.title, severity=EXCLUDED.severity,
                                body=EXCLUDED.body, status=EXCLUDED.status, updated_at=now()""",
                             (a.alert_id, a.tenant_id, a.signals[0]["source"] if a.signals else None, a.title, a.severity,
-                             json.dumps(body), "closed" if a.closed else "open", a.started))
+                             json.dumps(body), "closed" if a.closed else ("suppressed" if a.suppressed_reason else "open"), a.started))
             log.info("alert %s %s [%s/%s] river=%.2f agrees=%s", kind, a.title, a.kind, a.severity, a.second_opinion, a.agrees)
         for kind, inc in self.manager.step(now):
             c = inc.to_contract()
