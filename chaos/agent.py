@@ -47,12 +47,12 @@ _lock = threading.Lock()
 # request-supplied names (service, interface) reach subprocess argv: allow plain identifiers only
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 
-def _run_cpu_burner(duration_s: float):
-    """Pins every core but one (the guard needs one) for duration_s (one busy child process per core; a Python thread would only reach one core)."""
+def _run_cpu_burner(duration_s: float, cores: Optional[int] = None):
+    """Pins `cores` cores (default: every core but one, the guard needs one) for duration_s (one busy child process per core; a Python thread would only reach one core)."""
     import subprocess
     import sys
     code = f"import time; e = time.time() + {duration_s}; exec('while time.time() < e: pass')"
-    kids = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(max(1, (os.cpu_count() or 2) - 1))]
+    kids = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(cores or max(1, (os.cpu_count() or 2) - 1))]
     for k in kids:
         k.wait()
 
@@ -96,12 +96,11 @@ def _run_brute_force(duration_s: float, target_url: str):
 
 
 def _run_backup_job(duration_s: float):
-    """Periodic noisy backup job: 12 s CPU burst followed by 48 s idle."""
+    """Periodic noisy backup job: a 12 s burst on half the cores (a real spike on the host's CPU, one thread was invisible on a
+    many-core laptop), then idle until the next minute: the steady 60 s interval head office learns as a scheduled job."""
     end_time = time.time() + duration_s
     while time.time() < end_time:
-        burst_end = min(time.time() + 12.0, end_time)
-        while time.time() < burst_end:
-            _ = 999999.0 ** 0.5
+        _run_cpu_burner(min(12.0, end_time - time.time()), cores=max(2, (os.cpu_count() or 4) // 2))
         idle_until = min(time.time() + 48.0, end_time)
         remaining = idle_until - time.time()
         if remaining > 0:

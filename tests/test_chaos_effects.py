@@ -51,3 +51,13 @@ def test_shop_api_latency_window_slows_requests_then_ends():
     time.sleep(1.1)
     t = time.time(); c.get("/health"); fast = time.time() - t
     assert slow >= 0.28 and fast < 0.2
+
+
+def test_backup_job_bursts_on_half_the_cores_every_minute(monkeypatch):
+    burns, sleeps = [], []
+    monkeypatch.setattr(agent, "_run_cpu_burner", lambda d, cores=None: burns.append((round(d), cores)))
+    monkeypatch.setattr(agent.time, "sleep", lambda s: sleeps.append(s))
+    clock = iter(range(0, 10_000, 12))
+    monkeypatch.setattr(agent.time, "time", lambda: next(clock))
+    agent._run_backup_job(130)
+    assert burns and all(d <= 12 and (cores or 0) >= 2 for d, cores in burns)
