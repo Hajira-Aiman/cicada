@@ -54,14 +54,15 @@ class LogTailer:
             try:
                 data = json.loads(line)
                 ev = data.get("event")
+                ts = data.get("timestamp")
                 if ev == "login_failure":
                     username = data.get("username", "unknown")
                     ip = data.get("ip", "127.0.0.1")
-                    self.guard.record_login(raw_username=username, raw_ip=ip, success=False)
+                    self.guard.record_login(raw_username=username, raw_ip=ip, success=False, timestamp=ts)
                 elif ev == "login_success":
                     username = data.get("username", "unknown")
                     ip = data.get("ip", "127.0.0.1")
-                    self.guard.record_login(raw_username=username, raw_ip=ip, success=True)
+                    self.guard.record_login(raw_username=username, raw_ip=ip, success=True, timestamp=ts)
             except Exception:
                 pass
 

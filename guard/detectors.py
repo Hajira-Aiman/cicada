@@ -43,6 +43,8 @@ class AuthDetector:
         self.tenant_tz_str = tenant_tz_str
         # map: raw_ip -> list of failure timestamps
         self.failure_history: Dict[str, List[float]] = {}
+        # map: raw_ip -> count seen during previous check (to detect when growth stops)
+        self.last_failure_counts: Dict[str, int] = {}
         # map: raw_ip -> bool indicating if IP had failures before success
         self.had_failures: Set[str] = set()
 
@@ -120,35 +122,63 @@ class AuthDetector:
 
         return events
 
-    def evaluate_bursts(self, service_pseudonym: str, now: Optional[float] = None) -> List[EventSample]:
+    def evaluate_bursts(
+        self,
+        service_pseudonym: str,
+        now: Optional[float] = None,
+        force: bool = False,
+    ) -> List[EventSample]:
         """
         Evaluates sliding 60-second window for auth_failure_bursts (30+ failures).
-        Returns burst events and resets the evaluated bucket.
+        Emits once at the end of the burst (or when it stops growing) with the real total count.
         """
         current_time = now if now is not None else time.time()
         cutoff = current_time - 60.0
         events: List[EventSample] = []
 
         for raw_ip, timestamps in list(self.failure_history.items()):
-            # Keep only failures within last 60 seconds
-            valid_fails = [t for t in timestamps if t >= cutoff]
+            # Keep only failures within last 60 seconds up to current_time
+            valid_fails = [t for t in timestamps if cutoff <= t <= current_time]
             if len(valid_fails) >= 30:
-                actor_pseudonym = self.pseudonym_mgr.get_or_create("src", raw_ip)
-                burst_count = len(valid_fails)
-                events.append(
-                    EventSample(
-                        category="auth_failure_burst",
-                        severity="high",
-                        source=service_pseudonym,
-                        actor=actor_pseudonym,
-                        count=burst_count,
-                        window_s=60,
-                    )
+                last_fail_ts = max(valid_fails) if valid_fails else current_time
+                prev_count = self.last_failure_counts.get(raw_ip, 0)
+                curr_count = len(valid_fails)
+
+                quiet_time = current_time - last_fail_ts
+                # Burst has stopped if:
+                # - forced
+                # - quiet period >= 0.5s has elapsed since the last failure
+                # - OR the count hasn't grown since the previous evaluation check
+                burst_stopped = (
+                    force
+                    or (quiet_time >= 0.5)
+                    or (prev_count > 0 and curr_count == prev_count)
                 )
-                # Clear evaluated burst so only one burst event is emitted per surge
-                self.failure_history[raw_ip] = []
+
+                if burst_stopped:
+                    actor_pseudonym = self.pseudonym_mgr.get_or_create("src", raw_ip)
+                    events.append(
+                        EventSample(
+                            category="auth_failure_burst",
+                            severity="high",
+                            source=service_pseudonym,
+                            actor=actor_pseudonym,
+                            count=curr_count,
+                            window_s=60,
+                        )
+                    )
+                    logger.warning(
+                        f"Auth failure burst detected: {curr_count} failures from actor {actor_pseudonym}"
+                    )
+                    # Clear counted failures after emitting
+                    self.failure_history[raw_ip] = [t for t in timestamps if t > current_time]
+                    self.last_failure_counts.pop(raw_ip, None)
+                else:
+                    self.last_failure_counts[raw_ip] = curr_count
+                    self.failure_history[raw_ip] = valid_fails + [t for t in timestamps if t > current_time]
             else:
-                self.failure_history[raw_ip] = valid_fails
+                self.failure_history[raw_ip] = valid_fails + [t for t in timestamps if t > current_time]
+                self.last_failure_counts.pop(raw_ip, None)
 
         return events
 

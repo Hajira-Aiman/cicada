@@ -9,11 +9,12 @@ Verification for T11 Cryptographic Ledger + Outbox + Sender:
 - Idempotent duplicate receipt handling and mismatch protection
 """
 
+import uuid
 import pytest
 from starlette.testclient import TestClient
 from fastapi import FastAPI
 from hq.ingest.main import create_ingest_app
-from hq.db import init_all_databases, get_sqlite_conn
+from hq.db import init_all_databases, get_sqlite_conn, register_guard, execute_query
 from guard.config import GuardConfig
 from guard.ledger import GuardLedger
 from guard.outbox import GuardOutbox
@@ -81,8 +82,11 @@ def test_outbox_buffer_grows_when_ingest_stopped_and_drains_when_restored(tmp_pa
     cfg = GuardConfig()
     cfg.GUARD_DB_PATH = db_file
     cfg.TENANT_ID = "acme"
-    cfg.GUARD_ID = "guard-acme-01"
-    cfg.GUARD_SECRET_KEY = "sec-acme-super-secret-key-2026"
+    unique_guard_id = f"guard-test-{uuid.uuid4().hex[:8]}"
+    unique_secret = "sec-test-unique-key-2026"
+    register_guard(guard_id=unique_guard_id, tenant_id="acme", hmac_secret=unique_secret)
+    cfg.GUARD_ID = unique_guard_id
+    cfg.GUARD_SECRET_KEY = unique_secret
     cfg.REGION_URL = "/ingest"
 
     healthy_shop = FastAPI()
@@ -144,15 +148,12 @@ def test_outbox_buffer_grows_when_ingest_stopped_and_drains_when_restored(tmp_pa
                 assert r["receipt_at"] is not None
 
             # Confirm Head Office DB has all 3 payloads stored
-            conn = get_sqlite_conn("airlock_in")
-            cur = conn.cursor()
-            cur.execute(
-                "SELECT seq, payload_id FROM payloads WHERE payload_id IN (?, ?, ?) ORDER BY seq ASC",
-                (p1.payload_id, p2.payload_id, p3.payload_id),
+            db_rows = execute_query(
+                "airlock_in",
+                f"SELECT seq, payload_id FROM payloads WHERE guard_id = '{unique_guard_id}' ORDER BY seq ASC;",
             )
-            db_rows = cur.fetchall()
             assert len(db_rows) == 3
-            db_seqs = [r[0] for r in db_rows]
+            db_seqs = [r["seq"] for r in db_rows]
             assert db_seqs == [1, 2, 3]  # Zero gaps!
 
             # Next window collected reflects buffer_depth == 0
@@ -165,6 +166,12 @@ def test_duplicate_receipt_and_no_resend_when_already_received(tmp_path):
     db_file = str(tmp_path / "guard_dup.db")
     cfg = GuardConfig()
     cfg.GUARD_DB_PATH = db_file
+    cfg.TENANT_ID = "acme"
+    unique_guard_id = f"guard-test-{uuid.uuid4().hex[:8]}"
+    unique_secret = "sec-test-unique-key-2026"
+    register_guard(guard_id=unique_guard_id, tenant_id="acme", hmac_secret=unique_secret)
+    cfg.GUARD_ID = unique_guard_id
+    cfg.GUARD_SECRET_KEY = unique_secret
     cfg.REGION_URL = "/ingest"
 
     healthy_shop = FastAPI()

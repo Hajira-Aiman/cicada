@@ -148,4 +148,4 @@ def inject_log(req: InjectLogRequest):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("SHOP_API_PORT", "7000"))
-    uvicorn.run("shop-api.main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=port)
