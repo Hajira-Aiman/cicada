@@ -12,7 +12,7 @@ export const LiveMapTab: React.FC = () => {
   const guards = useLiveStore((s) => s.guards);
   const [viewMode, setViewMode] = useState<'2D' | '3D'>('2D');
 
-  const machines: Machine[] = Object.values(guards)
+  const real: Machine[] = Object.values(guards)
     .map((g) => ({
       id: g.guard_id,
       label: g.tenant_id === 'acme' ? 'SYSTEM 1' : g.tenant_id === 'globex' ? 'SYSTEM 2' : g.tenant_id.toUpperCase(),
@@ -22,6 +22,10 @@ export const LiveMapTab: React.FC = () => {
       connected: Date.now() - new Date(g.last_seen).getTime() < 30000 && g.state !== 'Offline',
       cpu: g.guard_cpu_pct, buffer: g.buffer_depth, lastSeen: g.last_seen,
     }));
+  // always two systems: one that has not reported yet shows as an offline laptop
+  const machines: Machine[] = [['acme', 'SYSTEM 1', 'in'], ['globex', 'SYSTEM 2', 'eu']].map(([t, label, region]) =>
+    real.find((m) => m.label === label) || { id: `guard-${t}-01`, label, state: 'Offline', region, risk: 0.2, baseColor: COLOR[t],
+      connected: false, cpu: 0, buffer: 0, lastSeen: new Date(0).toISOString() });
 
   return (
     <div className="h-[calc(100vh-3.5rem)] w-full p-4 flex flex-col space-y-3 font-mono text-xs">

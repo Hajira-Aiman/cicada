@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import { useUiStore } from '../stores/uiStore';
 import { useLiveStore } from '../stores/liveStore';
@@ -20,6 +20,12 @@ export const TopNav: React.FC = () => {
 
   const setAuth = useUiStore((s) => s.setAuth);
   const connected = useLiveStore((s) => s.connected);
+  const token = useUiStore((s) => s.authToken);
+  const userId = useUiStore((s) => s.currentUserId);
+  const logout = useUiStore((s) => s.logout);
+
+  // every endpoint needs a login: ask for it instead of silently showing an empty dashboard
+  useEffect(() => { if (!token) setLoginModalOpen(true); }, [token]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -75,6 +81,15 @@ export const TopNav: React.FC = () => {
               </NavLink>
             ))}
           </nav>
+        </div>
+        <div className="ml-auto flex items-center space-x-2 text-xs font-mono">
+          {token && <span className="text-slate-400">{userId}</span>}
+          <button
+            onClick={() => (token ? logout() : setLoginModalOpen(true))}
+            className="px-3 py-1.5 rounded border border-white/10 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold"
+          >
+            {token ? 'LOGOUT' : 'LOGIN'}
+          </button>
         </div>
       </header>
 

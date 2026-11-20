@@ -49,7 +49,7 @@ function Laptop({ m, z }: { m: Machine; z: number }) {
         <meshBasicMaterial color={glow} transparent opacity={0.9} side={THREE.DoubleSide} />
       </mesh>
       {m.connected && <pointLight position={[0, 0.5, 0]} color={glow} intensity={hot ? 4 : 1.6} distance={9} />}
-      <Html position={[0, 3.4, 0]} center distanceFactor={14} zIndexRange={[10, 0]}>
+      <Html position={[0, 3.4, 0]} center distanceFactor={22} zIndexRange={[10, 0]}>
         <div style={{ background: 'rgba(8,11,18,.88)', border: `1px solid ${edge}66`, borderRadius: 8, padding: '8px 10px',
           fontFamily: 'ui-monospace,monospace', fontSize: 11, color: '#e2e8f0', minWidth: 170, pointerEvents: 'none', boxShadow: `0 0 18px ${edge}33` }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontWeight: 800 }}>
@@ -79,7 +79,7 @@ function Gate() {
       <lineSegments rotation={[0, Math.PI / 2, 0]} geometry={edges}>
         <lineBasicMaterial color="#c084fc" />
       </lineSegments>
-      <Html position={[0, 4.2, 0]} center distanceFactor={14} zIndexRange={[10, 0]}>
+      <Html position={[0, 4.2, 0]} center distanceFactor={22} zIndexRange={[10, 0]}>
         <div style={{ fontFamily: 'ui-monospace,monospace', fontSize: 11, fontWeight: 800, letterSpacing: 2, color: '#d8b4fe', whiteSpace: 'nowrap', pointerEvents: 'none' }}>
           TRUST GATE · METADATA ONLY
         </div>
@@ -99,7 +99,7 @@ function HeadOffice() {
         </group>
       ))}
       <pointLight position={[-2, 3, 0]} color="#38bdf8" intensity={2} distance={10} />
-      <Html position={[0, 6.4, 0]} center distanceFactor={14} zIndexRange={[10, 0]}>
+      <Html position={[0, 6.4, 0]} center distanceFactor={22} zIndexRange={[10, 0]}>
         <div style={{ fontFamily: 'ui-monospace,monospace', fontSize: 11, fontWeight: 800, color: '#7dd3fc', textAlign: 'center', pointerEvents: 'none', whiteSpace: 'nowrap' }}>
           HEAD OFFICE<br /><span style={{ color: '#94a3b8', fontWeight: 400 }}>AIOps · ledger · AI</span>
         </div>
@@ -150,7 +150,7 @@ function Packets({ zs }: { zs: Record<string, number> }) {
 export function LaptopViewer({ machines }: { machines: Machine[] }) {
   const zs = useMemo(() => Object.fromEntries(machines.map((m, i) => [m.id, (i - (machines.length - 1) / 2) * 8])), [machines]);
   return (
-    <Canvas camera={{ position: [0, 9, 24], fov: 48 }} style={{ background: '#05070c' }}>
+    <Canvas camera={{ position: [14, 9, 20], fov: 48 }} style={{ background: '#05070c' }}>
       <fog attach="fog" args={['#05070c', 28, 70]} />
       <ambientLight intensity={0.35} />
       <directionalLight position={[6, 12, 6]} intensity={1.6} />
