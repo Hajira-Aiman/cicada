@@ -92,9 +92,9 @@ scenarios: cpu_spike, latency, login_burst, outage (stop sending), duplicates, o
 ### H6–H12 · Core
 
 #### T4. Anomaly flags + usage-spike rule · PRD #13, §Anomaly detection
-- [ ] Flag when \|z\| ≥ 3 for 3 windows in a row (6 s), so one blip is ignored.
-- [ ] Second opinion: River HalfSpaceTrees on `[cpu, mem, latency, loss, net_out]`. Agreement raises confidence.
-- [ ] CPU high alone, with latency and errors normal → `info: usage spike`. CPU + latency + errors → opens an incident.
+- [x] Flag when \|z\| ≥ 3 for 3 windows in a row (6 s), so one blip is ignored.
+- [x] Second opinion: River HalfSpaceTrees on `[cpu, mem, latency, loss, net_out]`. Agreement raises confidence.
+- [x] CPU high alone, with latency and errors normal → `info: usage spike`. CPU + latency + errors → opens an incident.
 - **Done when:** the CPU-spike button alone gives "usage spike", and CPU + latency gives an incident.
 
 #### T5. Incident grouping + noise counter · PRD #14, §Correlation and noise reduction
