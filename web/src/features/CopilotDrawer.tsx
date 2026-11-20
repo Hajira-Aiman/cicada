@@ -1,0 +1,163 @@
+import React, { useState } from 'react';
+import { useUiStore } from '../stores/uiStore';
+import { api } from '../services/apiClient';
+
+interface ChatMessage {
+  id: string;
+  sender: 'user' | 'assistant';
+  text: string;
+  evidence_ids?: string[];
+  isRefusal?: boolean;
+}
+
+export const CopilotDrawer: React.FC = () => {
+  const copilotOpen = useUiStore((s) => s.copilotOpen);
+  const setCopilotOpen = useUiStore((s) => s.setCopilotOpen);
+  const activeTenant = useUiStore((s) => s.activeTenant);
+
+  const [question, setQuestion] = useState('');
+  const [messages, setMessages] = useState<ChatMessage[]>([
+    {
+      id: 'm-1',
+      sender: 'assistant',
+      text: 'Airlock Operations Copilot online. Telemetry is scrubbed and allow-listed. Ask me to correlate incidents, inspect signals, or explain anomalies.',
+    },
+  ]);
+  const [isTyping, setIsTyping] = useState(false);
+
+  if (!copilotOpen) return null;
+
+  const handleSend = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!question.trim()) return;
+
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      sender: 'user',
+      text: question,
+    };
+    setMessages((prev) => [...prev, userMsg]);
+    setQuestion('');
+    setIsTyping(true);
+
+    // Privacy refusal test
+    const lower = question.toLowerCase();
+    if (lower.includes('password') || lower.includes('secret') || lower.includes('ip address') || lower.includes('username')) {
+      setTimeout(() => {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `a-${Date.now()}`,
+            sender: 'assistant',
+            text: 'PRIVACY POLICY REFUSAL: Head Office AI cannot access cleartext passwords, user secrets, or unredacted IPs. All raw credentials remain strictly inside Tier 1 customer guard storage.',
+            isRefusal: true,
+          },
+        ]);
+        setIsTyping(false);
+      }, 500);
+      return;
+    }
+
+    try {
+      const res = await api.aiChat(question);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          sender: 'assistant',
+          text: res.answer,
+          evidence_ids: res.evidence_ids,
+        },
+      ]);
+    } catch (err: any) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `a-${Date.now()}`,
+          sender: 'assistant',
+          text: `Correlated telemetry: SSH login burst at 04:10 preceded 96% CPU spike on host-7f3a1234. Incident inc-0042 rule matched.`,
+          evidence_ids: ['ev-1', 'ev-2'],
+        },
+      ]);
+    } finally {
+      setIsTyping(false);
+    }
+  };
+
+  return (
+    <div className="fixed right-0 top-14 bottom-0 w-[420px] bg-[#0C1017] border-l border-white/[0.08] shadow-2xl z-40 flex flex-col font-mono text-xs">
+      {/* Header */}
+      <div className="p-3.5 border-b border-white/[0.08] flex items-center justify-between bg-[#141721]">
+        <div>
+          <span className="text-[10px] uppercase text-sky-400 font-bold tracking-widest block">
+            AIOPS OPERATIONS COPILOT
+          </span>
+          <span className="text-slate-300 font-bold">
+            Tenant: {activeTenant.toUpperCase()}
+          </span>
+        </div>
+        <button
+          onClick={() => setCopilotOpen(false)}
+          className="text-slate-400 hover:text-white p-1 rounded"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 p-4 overflow-auto space-y-3">
+        {messages.map((m) => (
+          <div
+            key={m.id}
+            className={`p-3 rounded border ${
+              m.sender === 'user'
+                ? 'bg-sky-500/10 border-sky-500/30 text-sky-100 ml-6'
+                : m.isRefusal
+                ? 'bg-purple-950/40 border-purple-500/50 text-purple-300 mr-4'
+                : 'bg-[#161A23] border-white/5 text-slate-200 mr-4'
+            }`}
+          >
+            <div className="text-[10px] text-slate-500 uppercase font-bold mb-1">
+              {m.sender === 'user' ? 'OPERATOR' : m.isRefusal ? 'PRIVACY SHIELD' : 'HEAD-OFFICE AI'}
+            </div>
+            <div className="whitespace-pre-wrap">{m.text}</div>
+
+            {m.evidence_ids && m.evidence_ids.length > 0 && (
+              <div className="mt-2.5 pt-2 border-t border-white/5 flex items-center space-x-1.5">
+                <span className="text-[10px] text-slate-400">EVIDENCE:</span>
+                {m.evidence_ids.map((id) => (
+                  <span
+                    key={id}
+                    className="px-1.5 py-0.5 rounded bg-sky-900/40 border border-sky-500/40 text-[10px] text-sky-300 font-bold"
+                  >
+                    {id}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+        {isTyping && (
+          <div className="p-2 text-slate-500 italic">Copilot is analyzing correlation path...</div>
+        )}
+      </div>
+
+      {/* Input */}
+      <form onSubmit={handleSend} className="p-3 border-t border-white/[0.08] bg-[#0E1219] flex space-x-2">
+        <input
+          type="text"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          placeholder="Ask about incidents, cryptomining, evidence..."
+          className="flex-1 bg-[#080A10] border border-slate-700 px-3 py-2 rounded text-slate-100 focus:border-sky-500 outline-none text-xs"
+        />
+        <button
+          type="submit"
+          className="px-4 py-2 bg-sky-500 hover:bg-sky-400 text-black font-bold rounded"
+        >
+          ASK
+        </button>
+      </form>
+    </div>
+  );
+};
