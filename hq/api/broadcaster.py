@@ -40,6 +40,25 @@ class Broadcaster:
 
     def on_ingest_payload(self, payload_dict: Dict[str, Any]):
         """Bridge invoked synchronously from Ingest service; schedules broadcast."""
+        if payload_dict.get("event_type") == "alert_opened":
+            alert = payload_dict["alert"]
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(
+                    self.push_alert_opened(
+                        tenant_id=alert["tenant_id"],
+                        alert_id=alert["alert_id"],
+                        source=alert.get("source"),
+                        title=alert["title"],
+                        severity=alert["severity"],
+                        body=alert.get("body", {}),
+                        created_at=alert["created_at"],
+                    )
+                )
+            except RuntimeError:
+                pass
+            return
+
         event = {
             "event_type": "metrics_batch",
             "tenant_id": payload_dict["tenant_id"],

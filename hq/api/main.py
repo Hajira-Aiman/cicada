@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -110,9 +111,71 @@ def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = 
         return res
 
 
+# --- Phone Join & Heartbeat (T14) ---
+_phones: Dict[str, Dict[str, Any]] = {}
+
+
+class PhoneHeartbeatRequest(BaseModel):
+    phone_id: str
+    latency_ms: float = 0.0
+
+
+def record_phone_heartbeat(phone_id: str, latency_ms: float) -> Dict[str, Any]:
+    now_ts = time.time()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = {
+        "phone_id": phone_id,
+        "tenant_id": "guests",
+        "latency_ms": latency_ms,
+        "last_heartbeat": now_iso,
+        "last_heartbeat_ts": now_ts,
+    }
+    _phones[phone_id] = entry
+    return entry
+
+
+def get_active_phones() -> List[Dict[str, Any]]:
+    now_ts = time.time()
+    results = []
+    for pid, p in list(_phones.items()):
+        elapsed = now_ts - p["last_heartbeat_ts"]
+        is_online = (elapsed <= 60.0)
+        latency = p.get("latency_ms", 0.0)
+        color = "red" if (not is_online or latency > 150.0) else "green"
+        results.append({
+            "phone_id": pid,
+            "tenant_id": "guests",
+            "status": "online" if is_online else "offline",
+            "color": color,
+            "latency_ms": latency,
+            "last_heartbeat": p["last_heartbeat"],
+            "last_seen_s_ago": round(elapsed, 1),
+        })
+    return results
+
+
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "hq-api"}
+    return {"status": "ok", "service": "hq-api", "phones": get_active_phones()}
+
+
+@app.post("/api/phones/heartbeat")
+def phone_heartbeat(req: PhoneHeartbeatRequest):
+    entry = record_phone_heartbeat(req.phone_id, req.latency_ms)
+    color = "red" if req.latency_ms > 150.0 else "green"
+    return {
+        "status": "ok",
+        "phone_id": req.phone_id,
+        "tenant_id": "guests",
+        "state": "online",
+        "color": color,
+        "latency_ms": req.latency_ms,
+    }
+
+
+@app.get("/api/phones")
+def list_phones():
+    return {"phones": get_active_phones()}
 
 
 @app.post("/api/login", response_model=LoginResponse)
@@ -189,7 +252,7 @@ def get_alerts(user: Dict[str, Any] = Depends(get_current_user)):
 @app.get("/api/health")
 def get_health(user: Dict[str, Any] = Depends(get_current_user)):
     rows = query_tenant_data(user, "health_current", select_cols="tenant_id, source, state, reasons, since, flaps_prevented, updated")
-    return {"health": rows}
+    return {"health": rows, "phones": get_active_phones()}
 
 
 @app.get("/api/reconciliation")

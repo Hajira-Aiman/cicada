@@ -1326,6 +1326,59 @@ def update_tenant_counters(
     }
 
 
+def record_aiops_alert(
+    tenant_id: str,
+    title: str,
+    severity: str = "high",
+    source: Optional[str] = "ingest_security",
+    body: Optional[Dict[str, Any]] = None,
+    alert_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Records an alert row into the regional database aiops_alerts table."""
+    a_id = alert_id or f"alt-{uuid.uuid4().hex[:12]}"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+    body_dict = body or {}
+    body_json = json.dumps(body_dict)
+
+    if is_postgres_available():
+        pool = get_db_pool(db_name)
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO aiops_alerts (alert_id, tenant_id, source, title, severity, body, status, created_at, updated_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, 'open', %s, %s)
+                        ON CONFLICT (alert_id) DO NOTHING;
+                        """,
+                        (a_id, tenant_id, source, title, severity, body_json, now_iso, now_iso),
+                    )
+
+    conn_sq = get_sqlite_conn(db_name)
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR IGNORE INTO aiops_alerts (alert_id, tenant_id, source, title, severity, body, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?);
+        """,
+        (a_id, tenant_id, source, title, severity, body_json, now_iso, now_iso),
+    )
+    conn_sq.commit()
+
+    return {
+        "alert_id": a_id,
+        "tenant_id": tenant_id,
+        "source": source,
+        "title": title,
+        "severity": severity,
+        "body": body_dict,
+        "status": "open",
+        "created_at": now_iso,
+    }
+
+
 def create_action_intent(
     tenant_id: str,
     action: str,

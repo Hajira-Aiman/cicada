@@ -29,6 +29,7 @@ from hq.db import (
     is_region_paused,
     log_audit_event,
     lookup_guard,
+    record_aiops_alert,
     record_leak_detected,
     store_payload,
     update_guard_reconciliation,
@@ -55,6 +56,29 @@ def notify_listeners(payload_dict: Dict[str, Any]):
             listener(payload_dict)
         except Exception:
             pass
+
+
+def record_tamper_alert(
+    tenant_id: str,
+    tamper_type: str,
+    title: str,
+    severity: str = "high",
+    details: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Records a tamper alert in aiops_alerts and broadcasts it via WebSocket."""
+    alert = record_aiops_alert(
+        tenant_id=tenant_id,
+        title=title,
+        severity=severity,
+        source="ingest_security",
+        body={
+            "kind": tamper_type,
+            "signals": [{"source": "ingest_security", "name": tamper_type, "value": 1.0}],
+            **(details or {}),
+        },
+    )
+    notify_listeners({"event_type": "alert_opened", "alert": alert})
+    return alert
 
 
 def parse_iso8601_z(ts_str: str) -> datetime:
@@ -108,6 +132,13 @@ def process_ingest_payload(
     guard_record = lookup_guard(guard_id)
     if not guard_record:
         log_audit_event(actor=guard_id, action="rogue_guard", details={"guard_id": guard_id, "region": region})
+        record_tamper_alert(
+            tenant_id="acme",
+            tamper_type="rogue_guard",
+            title=f"Tamper: Rogue guard {guard_id}",
+            severity="critical",
+            details={"guard_id": guard_id, "region": region},
+        )
         return 401, {"error": f"Rogue guard '{guard_id}' is not registered in airlock_core"}
 
     tenant_id = guard_record["tenant_id"]
@@ -132,6 +163,13 @@ def process_ingest_payload(
     expected_sig = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected_sig, signature):
         log_audit_event(actor=guard_id, action="bad_signature", tenant_id=tenant_id, details={"guard_id": guard_id})
+        record_tamper_alert(
+            tenant_id=tenant_id,
+            tamper_type="bad_signature",
+            title=f"Tamper: Bad HMAC signature from {guard_id}",
+            severity="critical",
+            details={"guard_id": guard_id},
+        )
         return 401, {"error": "Invalid HMAC-SHA256 payload signature"}
 
     # 3. Timestamp within +/- 5 min (+/- 300s)
@@ -151,6 +189,13 @@ def process_ingest_payload(
         if skew_seconds > 30.0:
             log_audit_event(
                 actor=guard_id, action="clock_skew_warning", tenant_id=tenant_id, details={"skew_s": skew_seconds}
+            )
+            record_tamper_alert(
+                tenant_id=tenant_id,
+                tamper_type="clock_skew_warning",
+                title=f"Tamper: Clock skew warning ({int(skew_seconds)}s)",
+                severity="medium",
+                details={"skew_s": skew_seconds, "guard_id": guard_id},
             )
     except Exception as exc:
         log_audit_event(
@@ -181,6 +226,13 @@ def process_ingest_payload(
                 tenant_id=validated.tenant_id,
                 details={"expected": expected_policy, "received": validated.policy_version},
             )
+            record_tamper_alert(
+                tenant_id=validated.tenant_id,
+                tamper_type="policy_mismatch",
+                title=f"Tamper: Policy mismatch ({validated.policy_version})",
+                severity="high",
+                details={"expected": expected_policy, "received": validated.policy_version, "guard_id": guard_id},
+            )
             return 422, {"error": f"Policy mismatch: expected {expected_policy}, got {validated.policy_version}"}
 
     # 6. Canary and secret tripwire on the raw body
@@ -210,9 +262,24 @@ def process_ingest_payload(
             tenant_id=validated.tenant_id,
             details={"seq": validated.seq, "error": chain_err},
         )
+        record_tamper_alert(
+            tenant_id=validated.tenant_id,
+            tamper_type="chain_break",
+            title=f"Tamper: Hash chain break at seq {validated.seq}",
+            severity="critical",
+            details={"seq": validated.seq, "error": chain_err, "guard_id": guard_id},
+        )
         return 422, {"error": f"Hash chain break: {chain_err}"}
 
     storage_status = store_payload(db_name=db_name, payload_dict=payload_dict, sha256_hash=sha256_hash)
+    if storage_status == "duplicate":
+        record_tamper_alert(
+            tenant_id=validated.tenant_id,
+            tamper_type="duplicate_replay",
+            title=f"Tamper: Duplicate payload replayed ({payload_dict['payload_id']})",
+            severity="medium",
+            details={"payload_id": payload_dict["payload_id"], "guard_id": guard_id, "seq": validated.seq},
+        )
 
     # 8. Seq gap and prev_hash chain tracking
     is_dup = (storage_status == "duplicate")
