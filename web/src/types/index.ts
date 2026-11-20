@@ -109,7 +109,7 @@ export interface ActionRecord {
   tenant_id: string;
   action: string;
   target: string;
-  state: 'proposed' | 'dry_run' | 'approved' | 'executed' | 'rolled_back';
+  state: 'proposed' | 'dry_run' | 'approved' | 'executed' | 'rolled_back' | 'rejected_by_shop' | 'expired' | 'failed';
   result?: string;
   requested_by: string;
   approved_by?: string;

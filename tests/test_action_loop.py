@@ -48,3 +48,28 @@ def test_unhealthy_shop_is_rolled_back_and_reported(guard):
     rep = handle_intent(guard, ex, lambda m, p, params=None, json_body=None: calls.append(json_body), item(), settle_s=0.3)
     assert rep["health_improved"] is False and rep["details"].get("rolled_back") is True
     assert ex.rollback_timers["intent-1"]["status"] == "rolled_back"
+
+
+def test_nothing_runs_until_the_shop_approves_and_a_rejection_is_reported(guard):
+    from guard.action_loop import ActionQueue, approve_request, reject_request
+    calls = []
+    call = lambda method, path, params=None, json_body=None: calls.append((path, json_body))
+    q = ActionQueue()
+    q.add({**item(), "expires_at": "2999-01-01T00:00:00Z"})
+    q.add({**item(), "intent_id": "intent-2", "expires_at": "2999-01-01T00:00:00Z"})
+    assert [r["status"] for r in q.listing()] == ["pending", "pending"] and calls == []   # waiting, nothing executed or reported
+
+    assert reject_request(guard, q, call, "intent-2", "not now")
+    assert calls[-1][0] == "/api/actions/intent-2/result" and calls[-1][1]["status"] == "rejected"
+    assert reject_request(guard, q, call, "intent-2") is None   # decided once
+
+    assert approve_request(guard, RemediationExecutor(guard), q, call, "intent-1", settle_s=0.05, wait=True)
+    assert calls[-1][1]["status"] == "done" and q.get("intent-1")["status"] == "done"
+
+
+def test_expired_request_cannot_be_approved(guard):
+    from guard.action_loop import ActionQueue, approve_request
+    q = ActionQueue()
+    q.add({**item(), "expires_at": "2000-01-01T00:00:00Z"})
+    assert q.listing()[0]["status"] == "expired"
+    assert approve_request(guard, RemediationExecutor(guard), q, lambda *a, **k: None, "intent-1", wait=True) is None

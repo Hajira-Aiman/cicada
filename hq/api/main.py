@@ -473,7 +473,7 @@ class ApproveActionRequest(BaseModel):
 
 class ActionResultRequest(BaseModel):
     guard_id: str
-    status: str = "done"  # done | failed
+    status: str = "done"  # done | failed | rejected (the shop manager declined)
     details: Optional[Dict[str, Any]] = None
     health_improved: bool = True
     elapsed_seconds: int = 0
@@ -636,6 +636,11 @@ def post_action_result(
         raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
     if user["role"] == "guard":
         req.guard_id = user["guard_id"]   # identity comes from the signature, not the body
+
+    if req.status == "rejected":   # the shop manager said no: nothing ran
+        updated = update_action_intent_status(intent_id=intent_id, status="rejected_by_shop")
+        log_action_audit(intent_id=intent_id, actor=req.guard_id, step="rejected_by_shop", details=req.details or {})
+        return {"status": "rejected_by_shop", "intent_id": intent_id, "intent": updated}
 
     # If health did not improve or elapsed > 120s, trigger rollback
     if not req.health_improved or req.elapsed_seconds > 120:

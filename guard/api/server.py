@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from contracts.request_auth import PRIVATE_ORIGIN_REGEX
-from guard.action_loop import pull_actions_forever
+from guard.action_loop import ActionQueue, approve_request, pull_actions_forever, reject_request
 from guard.config import GuardConfig
 from guard.executor import RemediationExecutor
 from guard.hq_client import hq_call as _hq_call
@@ -183,9 +183,27 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
 
     executor = RemediationExecutor(_guard)
 
+    actions = ActionQueue()
+
     def pull_actions():
-        """Approved remediation intents are pulled, verified, run under local policy and reported (guard/action_loop.py)."""
-        pull_actions_forever(_guard, executor, hq_call)
+        """Intents approved at head office are pulled and verified, then wait here for the shop manager (guard/action_loop.py)."""
+        pull_actions_forever(_guard, actions, hq_call)
+
+    @api.get("/api/action-requests")
+    def list_action_requests():
+        return {"requests": actions.listing()}
+
+    @api.post("/api/action-requests/{intent_id}/approve")
+    def approve_action_request(intent_id: str):
+        if not approve_request(_guard, executor, actions, hq_call, intent_id):
+            raise HTTPException(status_code=409, detail="Request is not pending (already decided, running or expired)")
+        return {"status": "running"}
+
+    @api.post("/api/action-requests/{intent_id}/reject")
+    def reject_action_request(intent_id: str, body: Optional[DecisionRequest] = None):
+        if not reject_request(_guard, actions, hq_call, intent_id, (body.decision_reason if body else None) or "Declined by the shop manager"):
+            raise HTTPException(status_code=409, detail="Request is not pending (already decided, running or expired)")
+        return {"status": "rejected"}
 
     api.state.pull_actions = pull_actions
     api.state.pull_reveals = pull_reveals   # started only when run as a program (see __main__), never on import or in tests

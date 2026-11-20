@@ -23,6 +23,12 @@ export const IncidentCard: React.FC<IncidentCardProps> = ({ incident, onSelectEv
   const [intentId, setIntentId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const userId = useUiStore((s) => s.currentUserId) || 'operator';
+  const liveState = useLiveStore((s) => s.actions.find((a) => a.action_id === intentId)?.state);
+  const SHOP_STATE: Record<string, [string, string]> = {
+    approved: ['AWAITING SHOP APPROVAL', 'text-amber-300'], executed: ['RUN BY THE SHOP', 'text-emerald-400'],
+    rolled_back: ['ROLLED BACK (shop health did not improve)', 'text-amber-300'], rejected_by_shop: ['REJECTED BY SHOP', 'text-rose-400'],
+    expired: ['EXPIRED (shop did not answer in 10 min)', 'text-slate-400'], failed: ['FAILED ON THE SHOP', 'text-rose-400'] };
+  const shopState = liveState && SHOP_STATE[liveState];
 
   // real flow: propose -> dry run -> human approval (guard then pulls the signed intent)
   const handleDryRun = async () => {
@@ -241,7 +247,7 @@ Rollback: ${rec.rollback || 'n/a'}`);
                     : 'bg-emerald-600 text-white border-emerald-500 hover:bg-emerald-500'
                 }`}
               >
-                {actionDispatched ? '✓ DISPATCHED' : isApproving ? 'DISPATCHING...' : 'SEND FOR APPROVAL'}
+                {actionDispatched ? '✓ SENT TO SHOP' : isApproving ? 'SENDING...' : 'SEND TO SHOP FOR APPROVAL'}
               </button>
             </div>
           </div>
@@ -256,6 +262,7 @@ Rollback: ${rec.rollback || 'n/a'}`);
             <span>Rollback: <span className="text-slate-400">{incident.recommendation.rollback}</span></span>
           </div>
 
+          {shopState && <div className={`text-[11px] font-mono font-bold ${shopState[1]}`}>SHOP: {shopState[0]}</div>}
           {actionError && <div className="text-[11px] font-mono text-amber-300">{actionError}</div>}
           {dryRunOutput && (
             <pre className="p-2.5 rounded bg-black/60 border border-slate-700 text-[11px] font-mono text-cyan-300 whitespace-pre-wrap">

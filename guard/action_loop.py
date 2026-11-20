@@ -62,27 +62,98 @@ def handle_intent(guard, executor, call: Callable, item: Dict[str, Any], settle_
     return report
 
 
-def pull_actions_forever(guard, executor, call: Callable, every_s: float = 3.0) -> None:
-    """Poll head office for approved intents. Each intent id is handled once; a bad signature is logged and ignored."""
-    seen: Set[str] = set()
+class ActionQueue:
+    """Approved-at-head-office intents wait here for the shop manager. Nothing runs until the shop approves."""
+
+    def __init__(self):
+        self.items: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def add(self, item: Dict[str, Any]) -> None:
+        with self._lock:
+            self.items.setdefault(item["intent_id"], {"item": item, "status": "pending", "result": None})
+
+    def get(self, intent_id: str):
+        with self._lock:
+            return self.items.get(intent_id)
+
+    def set(self, intent_id: str, status: str, result=None) -> None:
+        with self._lock:
+            if intent_id in self.items:
+                self.items[intent_id].update(status=status, result=result)
+
+    def listing(self):
+        """Newest first, in the shape the shop screen shows. An expired pending request is shown as expired."""
+        now = time.time()
+        out = []
+        with self._lock:
+            for rec in self.items.values():
+                it = rec["item"]
+                status = rec["status"]
+                exp = _epoch(it.get("expires_at"))
+                if status == "pending" and exp and now > exp:
+                    status = "expired"
+                out.append({"intent_id": it["intent_id"], "action": it["action"], "target": it["target"], "status": status,
+                            "approved_by": it.get("approved_by"), "details": it.get("details") or {}, "created_at": it.get("created_at"),
+                            "expires_at": it.get("expires_at"), "result": rec["result"]})
+        return sorted(out, key=lambda r: str(r["created_at"]), reverse=True)
+
+
+def _epoch(value):
+    from datetime import datetime, timezone
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).rstrip("Z"))
+    except ValueError:
+        return None
+    return (dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def pull_actions_forever(guard, queue: ActionQueue, call: Callable, every_s: float = 3.0) -> None:
+    """Poll head office for approved intents. A bad signature is logged and ignored; a good one waits for the shop's decision."""
     while True:
         try:
             for item in call("GET", "/api/actions/pending").json().get("intents", []):
-                iid = item.get("intent_id")
-                if iid in seen:
-                    continue
-                seen.add(iid)
                 if not verify_intent(guard.config.GUARD_SECRET_KEY, item):
-                    logger.error(f"Intent {iid} has an invalid signature: ignored")
+                    if not queue.get(item.get("intent_id")):
+                        logger.error(f"Intent {item.get('intent_id')} has an invalid signature: ignored")
                     continue
-                threading.Thread(target=_safe_handle, args=(guard, executor, call, item), daemon=True).start()
+                queue.add(item)
         except Exception as exc:
             logger.debug(f"action poll failed: {exc}")
         time.sleep(every_s)
 
 
-def _safe_handle(guard, executor, call, item) -> None:
-    try:
-        handle_intent(guard, executor, call, item)
-    except Exception as exc:
-        logger.warning(f"Intent {item.get('intent_id')} failed: {exc}")
+def approve_request(guard, executor, queue: ActionQueue, call: Callable, intent_id: str, settle_s: float = SETTLE_S, wait: bool = False):
+    """The shop manager said yes: run it under the local policy (in the background unless wait=True) and report the outcome."""
+    rec = queue.get(intent_id)
+    shown = next((r for r in queue.listing() if r["intent_id"] == intent_id), None)
+    if not rec or not shown or shown["status"] != "pending":   # unknown, already decided, or past its 10-minute validity
+        return None
+    queue.set(intent_id, "running")
+
+    def run():
+        try:
+            report = handle_intent(guard, executor, call, rec["item"], settle_s)
+            ok = report["status"] == "done" and report["health_improved"]
+            queue.set(intent_id, "done" if ok else ("rolled_back" if report["status"] == "done" else "failed"), report["details"])
+        except Exception as exc:
+            logger.warning(f"Intent {intent_id} failed: {exc}")
+            queue.set(intent_id, "failed", {"reason": str(exc)})
+    if wait:
+        run()
+    else:
+        threading.Thread(target=run, daemon=True).start()
+    return True
+
+
+def reject_request(guard, queue: ActionQueue, call: Callable, intent_id: str, reason: str = "Declined by the shop manager"):
+    """The shop manager said no: nothing runs, head office is told."""
+    rec = queue.get(intent_id)
+    if not rec or rec["status"] != "pending":
+        return None
+    queue.set(intent_id, "rejected", {"reason": reason})
+    call("POST", f"/api/actions/{intent_id}/result", json_body={"guard_id": guard.config.GUARD_ID, "status": "rejected",
+         "details": {"reason": reason}, "health_improved": True, "elapsed_seconds": 0})
+    return True

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { shopApi, LocalGuardStatus, LocalLogEntry, EgressPayloadEntry, RevealRequestItem } from '../../services/shopApi';
+import { shopApi, LocalGuardStatus, LocalLogEntry, EgressPayloadEntry, RevealRequestItem, ActionRequestItem } from '../../services/shopApi';
 import { EgressProofPanel } from '../../components/EgressProofPanel';
 import { TimeText } from '../../components/TimeText';
 import { LocalAiChat, AiReference } from './LocalAiChat';
@@ -11,6 +11,7 @@ export const ShopApp: React.FC = () => {
   const [logs, setLogs] = useState<LocalLogEntry[]>([]);
   const [egressList, setEgressList] = useState<EgressPayloadEntry[]>([]);
   const [revealRequests, setRevealRequests] = useState<RevealRequestItem[]>([]);
+  const [actionRequests, setActionRequests] = useState<ActionRequestItem[]>([]);
   const [countdown, setCountdown] = useState(84200);
   const [selectedEgress, setSelectedEgress] = useState<EgressPayloadEntry | null>(null);
   const [decidingId, setDecidingId] = useState<string | null>(null);
@@ -18,12 +19,14 @@ export const ShopApp: React.FC = () => {
 
   useEffect(() => {
     const fetchData = async () => {
-      const [st, lg, eg, rev] = await Promise.all([
+      const [st, lg, eg, rev, act] = await Promise.all([
         shopApi.getStatus(),
         shopApi.getRawLogs(),
         shopApi.getEgressLedger(),
         shopApi.getRevealRequests(),
+        shopApi.getActionRequests(),
       ]);
+      setActionRequests(act);
 
       if (st) {
         setStatus(st);
@@ -268,6 +271,39 @@ export const ShopApp: React.FC = () => {
 
               {/* Reveal Requests */}
               <div className="lg:col-span-4 space-y-2">
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
+                  CLOUD ACTION REQUESTS (APPROVE BEFORE ANYTHING RUNS)
+                </span>
+                <div className="space-y-3">
+                  {actionRequests.map((a) => (
+                    <div key={a.intent_id} className="hud-panel p-4 space-y-2 border border-cyan-500/30 bg-[#0c101b]">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-white text-xs">{a.action.toUpperCase()}: <span className="text-cyan-300">{a.target}</span></span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          a.status === 'pending' ? 'bg-amber-500/20 text-amber-400'
+                          : a.status === 'done' ? 'bg-emerald-500/20 text-emerald-400'
+                          : a.status === 'running' ? 'bg-sky-500/20 text-sky-300'
+                          : 'bg-rose-500/20 text-rose-400'}`}>{a.status.replace('_', ' ').toUpperCase()}</span>
+                      </div>
+                      {(a.details?.why || a.details?.impact) && <p className="text-slate-300 text-xs leading-relaxed">{a.details?.why || a.details?.impact}</p>}
+                      <div className="text-[10px] text-slate-500">Approved at head office by {a.approved_by || '—'} · <TimeText timestamp={a.created_at} /></div>
+                      {a.status === 'pending' && (
+                        <div className="flex space-x-2 pt-1 border-t border-white/5">
+                          <button onClick={() => shopApi.decideAction(a.intent_id, true)}
+                            className="flex-1 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs cursor-pointer">APPROVE &amp; RUN</button>
+                          <button onClick={() => shopApi.decideAction(a.intent_id, false)}
+                            className="flex-1 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs cursor-pointer">REJECT</button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                  {actionRequests.length === 0 && (
+                    <div className="hud-panel p-6 text-center text-slate-500 text-xs">No action requests from Cloud Dashboard.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="lg:col-span-4 lg:col-start-9 space-y-2">
                 <span className="text-xs font-bold text-slate-400 uppercase tracking-wider block">
                   CLOUD REVEAL REQUESTS
                 </span>

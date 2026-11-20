@@ -56,6 +56,17 @@ export interface RevealRequestItem {
   revealed_value?: string;
 }
 
+export interface ActionRequestItem {
+  intent_id: string;
+  action: string;
+  target: string;
+  status: 'pending' | 'running' | 'done' | 'failed' | 'rolled_back' | 'rejected' | 'expired';
+  approved_by?: string;
+  details?: { why?: string; impact?: string; [k: string]: any };
+  created_at: string;
+  expires_at?: string;
+}
+
 const SECRETS: [string, RegExp][] = [
   ['Cloud Key', /AKIA[0-9A-Z]{8,}/g], ['Password', /password=\S+/gi], ['Token', /(?:token|secret|access_key|api_key)=\S+/gi],
   ['JWT Token', /eyJ[\w-]+\.[\w-]+\.[\w-]+/g], ['Card Number', /(?:\d{4}[ -]?){3}\d{4}/g],
@@ -110,6 +121,16 @@ export const shopApi = {
     const r = await get<{ requests: any[] }>('/api/reveal-requests');
     return (r?.requests || []).map((q) => ({ request_id: q.id, pseudonym: q.pseudonym, reason: q.reason, requested_by: 'head-office',
       status: q.status, requested_at: iso(q.requested_at), revealed_value: q.revealed_value }));
+  },
+
+  getActionRequests: async (): Promise<ActionRequestItem[]> => (await get<{ requests: ActionRequestItem[] }>('/api/action-requests'))?.requests || [],
+
+  decideAction: async (intentId: string, approve: boolean): Promise<boolean> => {
+    try {
+      const res = await fetch(`${GUARD_API_URL}/api/action-requests/${intentId}/${approve ? 'approve' : 'reject'}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      return res.ok;
+    } catch { return false; }
   },
 
   decideReveal: async (requestId: string, status: 'approved' | 'rejected', reason?: string): Promise<boolean> => {
