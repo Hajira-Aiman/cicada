@@ -155,6 +155,27 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 decided_at TEXT,
                 decision_reason TEXT
             );
+            CREATE TABLE IF NOT EXISTS action_intents (
+                intent_id TEXT PRIMARY KEY,
+                incident_id TEXT,
+                tenant_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                target TEXT NOT NULL,
+                risk TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                details TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                approved_by TEXT,
+                expires_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS action_audit (
+                event_id TEXT PRIMARY KEY,
+                intent_id TEXT,
+                actor TEXT NOT NULL,
+                step TEXT NOT NULL,
+                details TEXT,
+                at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             INSERT OR IGNORE INTO region_states (region, is_paused) VALUES ('in', 0), ('eu', 0);
             INSERT OR IGNORE INTO tenants (tenant_id, name, assigned_region, pinned_policy_hash) VALUES
                 ('acme', 'Acme Shop A', 'in', 'sha256:v1-default-policy,sha256:ab1289cf001e35a9'),
@@ -1305,6 +1326,211 @@ def update_tenant_counters(
     }
 
 
+def create_action_intent(
+    tenant_id: str,
+    action: str,
+    target: str,
+    risk: str = "low",
+    why: str = "",
+    incident_id: Optional[str] = None,
+    reversible: bool = True,
+    rollback: Optional[str] = None,
+    intent_id: Optional[str] = None,
+    expires_in_s: int = 600,
+) -> Dict[str, Any]:
+    """Creates a proposed action intent in airlock_core with 10-minute expiration and audit entry."""
+    i_id = intent_id or f"act-{uuid.uuid4().hex[:12]}"
+    now_dt = datetime.now(timezone.utc)
+    now_iso = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_dt = datetime.fromtimestamp(now_dt.timestamp() + expires_in_s, tz=timezone.utc)
+    expires_iso = expires_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    details = {
+        "why": why,
+        "reversible": reversible,
+        "rollback": rollback,
+    }
+    details_json = json.dumps(details)
+
+    if is_postgres_available():
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO action_intents (
+                            intent_id, incident_id, tenant_id, action, target, risk, status, details, created_at, expires_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, 'proposed', %s, %s, %s)
+                        ON CONFLICT (intent_id) DO NOTHING;
+                        """,
+                        (i_id, incident_id, tenant_id, action, target, risk, details_json, now_iso, expires_iso),
+                    )
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR IGNORE INTO action_intents (
+            intent_id, incident_id, tenant_id, action, target, risk, status, details, created_at, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'proposed', ?, ?, ?);
+        """,
+        (i_id, incident_id, tenant_id, action, target, risk, details_json, now_iso, expires_iso),
+    )
+    conn_sq.commit()
+
+    log_action_audit(intent_id=i_id, actor="aiops", step="proposed", details=details)
+
+    return {
+        "intent_id": i_id,
+        "incident_id": incident_id,
+        "tenant_id": tenant_id,
+        "action": action,
+        "target": target,
+        "risk": risk,
+        "status": "proposed",
+        "why": why,
+        "reversible": reversible,
+        "rollback": rollback,
+        "created_at": now_iso,
+        "expires_at": expires_iso,
+    }
+
+
+def get_action_intent(intent_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves an action intent by ID from airlock_core."""
+    query = "SELECT * FROM action_intents WHERE intent_id = %s;" if is_postgres_available() else "SELECT * FROM action_intents WHERE intent_id = ?;"
+    rows = execute_query("airlock_core", query, (intent_id,))
+    if rows:
+        r = dict(rows[0])
+        if isinstance(r.get("details"), str):
+            try:
+                r["details"] = json.loads(r["details"])
+            except Exception:
+                pass
+        return r
+    return None
+
+
+def update_action_intent_status(
+    intent_id: str,
+    status: str,
+    approved_by: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Updates status and approver of an action intent."""
+    if is_postgres_available():
+        pool = get_db_pool("airlock_core")
+        with pool.connection() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    if approved_by:
+                        cur.execute(
+                            "UPDATE action_intents SET status = %s, approved_by = %s WHERE intent_id = %s;",
+                            (status, approved_by, intent_id),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE action_intents SET status = %s WHERE intent_id = %s;",
+                            (status, intent_id),
+                        )
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    if approved_by:
+        cur_sq.execute(
+            "UPDATE action_intents SET status = ?, approved_by = ? WHERE intent_id = ?;",
+            (status, approved_by, intent_id),
+        )
+    else:
+        cur_sq.execute(
+            "UPDATE action_intents SET status = ? WHERE intent_id = ?;",
+            (status, intent_id),
+        )
+    conn_sq.commit()
+    return get_action_intent(intent_id)
+
+
+def count_recent_intents(tenant_id: str, window_seconds: int = 600) -> int:
+    """Counts proposed/executed intents for a tenant within the sliding window."""
+    cutoff = datetime.fromtimestamp(time.time() - window_seconds, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query = (
+        "SELECT COUNT(*) AS cnt FROM action_intents WHERE tenant_id = %s AND created_at >= %s;"
+        if is_postgres_available()
+        else "SELECT COUNT(*) AS cnt FROM action_intents WHERE tenant_id = ? AND created_at >= ?;"
+    )
+    rows = execute_query("airlock_core", query, (tenant_id, cutoff))
+    if rows:
+        return int(rows[0].get("cnt", 0))
+    return 0
+
+
+def list_pending_action_intents(tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Lists approved intents that have not expired."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    query = (
+        "SELECT * FROM action_intents WHERE status = 'approved' AND (expires_at IS NULL OR expires_at > %s)"
+        if is_postgres_available()
+        else "SELECT * FROM action_intents WHERE status = 'approved' AND (expires_at IS NULL OR expires_at > ?)"
+    )
+    params = [now_iso]
+    if tenant_id and tenant_id != "all":
+        query += " AND tenant_id = %s" if is_postgres_available() else " AND tenant_id = ?"
+        params.append(tenant_id)
+    query += " ORDER BY created_at ASC;"
+    rows = execute_query("airlock_core", query, tuple(params))
+    return [dict(r) for r in rows]
+
+
+def log_action_audit(
+    intent_id: Optional[str],
+    actor: str,
+    step: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Logs an action intent lifecycle event in action_audit."""
+    event_id = f"actaud-{uuid.uuid4().hex[:12]}"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    details_json = json.dumps(details or {})
+
+    if is_postgres_available():
+        try:
+            pool = get_db_pool("airlock_core")
+            with pool.connection() as conn:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """
+                            INSERT INTO action_audit (event_id, intent_id, actor, step, details, at)
+                            VALUES (%s, %s, %s, %s, %s, %s);
+                            """,
+                            (event_id, intent_id, actor, step, details_json, now_iso),
+                        )
+        except Exception:
+            pass
+
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT INTO action_audit (event_id, intent_id, actor, step, details, at)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (event_id, intent_id, actor, step, details_json, now_iso),
+    )
+    conn_sq.commit()
+    return event_id
+
+
+def get_action_audit_logs(intent_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """Returns action audit entries."""
+    query = "SELECT * FROM action_audit WHERE 1=1"
+    params = []
+    if intent_id:
+        query += " AND intent_id = %s" if is_postgres_available() else " AND intent_id = ?"
+        params.append(intent_id)
+    query += " ORDER BY at DESC LIMIT %s;" if is_postgres_available() else " ORDER BY at DESC LIMIT ?;"
+    params.append(limit)
+    rows = execute_query("airlock_core", query, tuple(params))
+    return [dict(r) for r in rows]
+
+
 def truncate_all_data():
     """Truncates/clears all dynamic test data to ensure test independence."""
     regional_tables = [
@@ -1324,6 +1550,8 @@ def truncate_all_data():
         "audit_log",
         "leak_counters",
         "reveal_requests",
+        "action_intents",
+        "action_audit",
     ]
     if is_postgres_available():
         for db in ("airlock_in", "airlock_eu"):

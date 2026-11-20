@@ -62,6 +62,29 @@ CREATE TABLE IF NOT EXISTS reveal_requests (
     decision_reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS action_intents (
+    intent_id VARCHAR(64) PRIMARY KEY,
+    incident_id VARCHAR(64),
+    tenant_id VARCHAR(64) NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    target VARCHAR(128) NOT NULL,
+    risk VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'proposed',
+    details JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    approved_by VARCHAR(128),
+    expires_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE IF NOT EXISTS action_audit (
+    event_id VARCHAR(64) PRIMARY KEY,
+    intent_id VARCHAR(64),
+    actor VARCHAR(128) NOT NULL,
+    step VARCHAR(64) NOT NULL,
+    details JSONB,
+    at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 INSERT INTO region_states (region, is_paused) VALUES ('in', FALSE), ('eu', FALSE)
 ON CONFLICT (region) DO NOTHING;
 

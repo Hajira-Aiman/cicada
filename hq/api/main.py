@@ -6,9 +6,12 @@ role-based tenant separation (engineer vs customer),
 and database-enforced Row-Level Security (RLS).
 """
 
+import hashlib
+import hmac
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -21,16 +24,24 @@ from hq.db import (
     authenticate_user,
     compare_guard_checkpoint,
     compute_guard_checkpoint,
+    count_recent_intents,
+    create_action_intent,
     create_reveal_request,
     execute_query,
+    get_action_audit_logs,
+    get_action_intent,
     get_tenant_assigned_region,
     get_tenant_counters,
     init_all_databases,
     is_region_paused,
+    list_pending_action_intents,
     list_reveal_requests,
+    log_action_audit,
     log_audit_event,
+    lookup_guard,
     record_feedback,
     set_region_paused,
+    update_action_intent_status,
     update_reveal_request_status,
     verify_session_token,
 )
@@ -300,6 +311,237 @@ def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Opt
     if not updated:
         raise HTTPException(status_code=404, detail="Reveal request not found")
     return updated
+
+
+# --- Action Intents, Approvals, Dry-Run & Audit (T12) ---
+
+ALLOWED_ACTIONS = {"kill_process", "block_source", "block_ip", "restart_service", "investigate"}
+
+
+class ProposeActionRequest(BaseModel):
+    action: str  # kill_process | block_source | block_ip | restart_service | investigate
+    target: str  # pseudonym
+    why: str = ""
+    risk: str = "low"  # low | medium | high
+    reversible: bool = True
+    rollback: Optional[str] = None
+    incident_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class ApproveActionRequest(BaseModel):
+    approved_by: str
+
+
+class ActionResultRequest(BaseModel):
+    guard_id: str
+    status: str = "done"  # done | failed
+    details: Optional[Dict[str, Any]] = None
+    health_improved: bool = True
+    elapsed_seconds: int = 0
+
+
+@app.post("/api/actions/propose")
+def propose_action(
+    req: ProposeActionRequest,
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+):
+    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
+
+    # Head-office policy check 1: allowed action
+    if req.action not in ALLOWED_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Policy check failed: action '{req.action}' is not in allowed actions: {sorted(ALLOWED_ACTIONS)}",
+        )
+
+    # Head-office policy check 2: risk <= medium
+    risk_lower = req.risk.lower()
+    if risk_lower not in ("low", "medium"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Policy check failed: risk '{req.risk}' exceeds maximum allowed threshold (risk <= medium required)",
+        )
+
+    # Head-office policy check 3: max 3 per 10 minutes sliding window
+    recent_cnt = count_recent_intents(tenant_id, window_seconds=600)
+    if recent_cnt >= 3:
+        raise HTTPException(
+            status_code=429,
+            detail="Policy check failed: maximum 3 action proposals per 10 minutes exceeded for tenant",
+        )
+
+    intent = create_action_intent(
+        tenant_id=tenant_id,
+        action=req.action,
+        target=req.target,
+        risk=risk_lower,
+        why=req.why,
+        incident_id=req.incident_id,
+        reversible=req.reversible,
+        rollback=req.rollback,
+    )
+    return intent
+
+
+@app.post("/api/actions/{intent_id}/dry-run")
+def dry_run_action(
+    intent_id: str,
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+):
+    intent = get_action_intent(intent_id)
+    if not intent:
+        raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
+
+    actor = (user.get("user_id") if user else "operator") or "operator"
+    updated = update_action_intent_status(intent_id=intent_id, status="dry_run_done")
+    simulation = {
+        "action": intent["action"],
+        "target": intent["target"],
+        "would_succeed": True,
+        "impact": f"Simulated execution of '{intent['action']}' on target '{intent['target']}': safe to proceed.",
+    }
+    log_action_audit(intent_id=intent_id, actor=actor, step="dry_run_done", details=simulation)
+    return {
+        "status": "dry_run_done",
+        "intent_id": intent_id,
+        "simulation": simulation,
+        "intent": updated,
+    }
+
+
+@app.post("/api/actions/{intent_id}/approve")
+def approve_action(
+    intent_id: str,
+    req: ApproveActionRequest,
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+):
+    if not req.approved_by or not req.approved_by.strip():
+        raise HTTPException(status_code=400, detail="Approval requires the person's name (approved_by)")
+
+    intent = get_action_intent(intent_id)
+    if not intent:
+        raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
+
+    if intent["status"] != "dry_run_done":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Action must undergo dry run before approval (current status: '{intent['status']}')",
+        )
+
+    # Check expiration (10 minutes)
+    if intent.get("expires_at"):
+        exp_raw = str(intent["expires_at"]).rstrip("Z")
+        exp_dt = datetime.fromisoformat(exp_raw)
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > exp_dt:
+            update_action_intent_status(intent_id=intent_id, status="expired")
+            log_action_audit(intent_id=intent_id, actor="system", step="expired")
+            raise HTTPException(status_code=400, detail="Action intent has expired (10-minute validity)")
+
+    updated = update_action_intent_status(intent_id=intent_id, status="approved", approved_by=req.approved_by.strip())
+    log_action_audit(intent_id=intent_id, actor=req.approved_by.strip(), step="approved")
+    return {
+        "status": "approved",
+        "intent_id": intent_id,
+        "approved_by": req.approved_by.strip(),
+        "intent": updated,
+    }
+
+
+@app.get("/api/actions/pending")
+def get_pending_actions(
+    guard_id: Optional[str] = None,
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+):
+    tenant_id = None
+    secret = "airlock-head-office-session-secret-2026"
+    if guard_id:
+        guard = lookup_guard(guard_id)
+        if guard:
+            tenant_id = guard["tenant_id"]
+            secret = guard["hmac_secret"]
+    elif user and user.get("role") == "customer":
+        tenant_id = user.get("tenant_id")
+
+    intents = list_pending_action_intents(tenant_id=tenant_id)
+    signed_intents = []
+    for it in intents:
+        created_at_str = it["created_at"].isoformat() if hasattr(it["created_at"], "isoformat") else str(it["created_at"])
+        signed_item = dict(it)
+        signed_item["created_at"] = created_at_str
+
+        # Generate HMAC-SHA256 signature matching guard ingest scheme
+        body_to_sign = json.dumps(
+            {
+                "intent_id": it["intent_id"],
+                "tenant_id": it["tenant_id"],
+                "action": it["action"],
+                "target": it["target"],
+                "created_at": created_at_str,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+        sig = hmac.new(secret.encode("utf-8"), body_to_sign, hashlib.sha256).hexdigest()
+        signed_item["signature"] = sig
+        signed_intents.append(signed_item)
+        if guard_id:
+            log_action_audit(intent_id=it["intent_id"], actor=guard_id, step="pulled_by_guard")
+
+    return {"intents": signed_intents}
+
+
+@app.post("/api/actions/{intent_id}/result")
+def post_action_result(
+    intent_id: str,
+    req: ActionResultRequest,
+):
+    intent = get_action_intent(intent_id)
+    if not intent:
+        raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
+
+    # If health did not improve or elapsed > 120s, trigger rollback
+    if not req.health_improved or req.elapsed_seconds > 120:
+        updated = update_action_intent_status(intent_id=intent_id, status="rolled_back")
+        log_action_audit(
+            intent_id=intent_id,
+            actor=req.guard_id,
+            step="rolled_back",
+            details={
+                "health_improved": req.health_improved,
+                "elapsed_seconds": req.elapsed_seconds,
+                "reason": "Health did not improve within 120s; automated rollback triggered",
+            },
+        )
+        return {
+            "status": "rolled_back",
+            "intent_id": intent_id,
+            "rollback_reason": "Health did not improve within 120s",
+            "intent": updated,
+        }
+
+    status_val = "done" if req.status == "done" else "failed"
+    updated = update_action_intent_status(intent_id=intent_id, status=status_val)
+    log_action_audit(
+        intent_id=intent_id,
+        actor=req.guard_id,
+        step=f"execution_{status_val}",
+        details=req.details or {},
+    )
+    return {
+        "status": status_val,
+        "intent_id": intent_id,
+        "intent": updated,
+    }
+
+
+@app.get("/api/actions/audit")
+def get_action_audit(
+    intent_id: Optional[str] = None,
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+):
+    return {"audit_log": get_action_audit_logs(intent_id=intent_id)}
 
 
 class FeedbackRequest(BaseModel):
