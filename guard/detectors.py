@@ -127,35 +127,31 @@ class AuthDetector:
         service_pseudonym: str,
         now: Optional[float] = None,
         force: bool = False,
+        quiet_seconds: float = 4.0,
     ) -> List[EventSample]:
         """
-        Evaluates sliding 60-second window for auth_failure_bursts (30+ failures).
-        Emits once at the end of the burst (or when it stops growing) with the real total count.
+        Evaluates auth_failure_bursts (30+ failures).
+        Uses a quiet period of 4.0s before a burst is finished.
+        Emits once at the end of the burst with the real total count.
+        Emits a second event only if a new burst starts after the quiet period.
         """
         current_time = now if now is not None else time.time()
-        cutoff = current_time - 60.0
         events: List[EventSample] = []
 
         for raw_ip, timestamps in list(self.failure_history.items()):
-            # Keep only failures within last 60 seconds up to current_time
-            valid_fails = [t for t in timestamps if cutoff <= t <= current_time]
-            if len(valid_fails) >= 30:
-                last_fail_ts = max(valid_fails) if valid_fails else current_time
-                prev_count = self.last_failure_counts.get(raw_ip, 0)
-                curr_count = len(valid_fails)
+            # Keep only failures up to current_time
+            fails = [t for t in timestamps if t <= current_time]
+            if not fails:
+                continue
 
-                quiet_time = current_time - last_fail_ts
-                # Burst has stopped if:
-                # - forced
-                # - quiet period >= 0.5s has elapsed since the last failure
-                # - OR the count hasn't grown since the previous evaluation check
-                burst_stopped = (
-                    force
-                    or (quiet_time >= 0.5)
-                    or (prev_count > 0 and curr_count == prev_count)
-                )
+            last_fail_ts = max(fails)
+            quiet_time = current_time - last_fail_ts
 
-                if burst_stopped:
+            burst_finished = force or (quiet_time >= quiet_seconds)
+
+            if burst_finished:
+                curr_count = len(fails)
+                if curr_count >= 30:
                     actor_pseudonym = self.pseudonym_mgr.get_or_create("src", raw_ip)
                     events.append(
                         EventSample(
@@ -170,15 +166,12 @@ class AuthDetector:
                     logger.warning(
                         f"Auth failure burst detected: {curr_count} failures from actor {actor_pseudonym}"
                     )
-                    # Clear counted failures after emitting
-                    self.failure_history[raw_ip] = [t for t in timestamps if t > current_time]
-                    self.last_failure_counts.pop(raw_ip, None)
-                else:
-                    self.last_failure_counts[raw_ip] = curr_count
-                    self.failure_history[raw_ip] = valid_fails + [t for t in timestamps if t > current_time]
-            else:
-                self.failure_history[raw_ip] = valid_fails + [t for t in timestamps if t > current_time]
+                # Burst finished: clear counted failures so next burst starts fresh after quiet period
+                self.failure_history[raw_ip] = [t for t in timestamps if t > current_time]
                 self.last_failure_counts.pop(raw_ip, None)
+            else:
+                # Still active (quiet_time < quiet_seconds): keep tracking, do not emit yet
+                self.last_failure_counts[raw_ip] = len(fails)
 
         return events
 
