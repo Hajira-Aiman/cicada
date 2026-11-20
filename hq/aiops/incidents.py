@@ -73,6 +73,7 @@ class Inc:
         self.proc = None     # pseudonym of the suspicious new process, if the guard reported one
         self.sent = None     # signature of the last emitted version
         self.closed = False
+        self.narrative, self.narrated = None, None   # text, and the (title, severity) it was written for
 
     def components(self):
         return {COMPONENT.get(n, "host") for (_s, n) in self.sig}
@@ -182,7 +183,7 @@ class Inc:
                         signals=sigs, reasoning_path=path, counterfactual=self.counterfactual(),
                         recommendation=self.recommendation(),
                         changes_before=[f"started {d:.0f} s after {lab}" for d, lab in self.changes],
-                        repeat_count=sum(s["repeats"] for s in self.sig.values()))
+                        repeat_count=sum(s["repeats"] for s in self.sig.values()), narrative=self.narrative)
 
     def signature(self):
         return (self.title(), self.severity(), tuple(sorted(self.sig)), round(self.confidence()[0], 2),

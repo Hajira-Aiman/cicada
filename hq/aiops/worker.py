@@ -2,12 +2,13 @@
   python -m hq.aiops.worker
 Tables it reads (metrics, events, payloads: Sahiti's scripts/init_postgres.sql); it owns health_history, health_current, tenant_thresholds.
 All table access is in this file, so swapping to the real ingest schema only touches the SELECTs below."""
-import json, logging, time
+import json, logging, queue, threading, time
 from datetime import datetime, timezone
 import psycopg
 from hq.aiops.engine import Engine, Thresholds
 from hq.aiops.anomaly import Detector
 from hq.aiops.incidents import Manager
+from hq.ai.assistant import deterministic_narrative, llm_narrative
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -28,6 +29,32 @@ iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M
 REPLAY_S = 300  # on start, rebuild baselines from the last 5 minutes
 
 
+class Narrator(threading.Thread):
+    """Rewrites incident narratives with the local LLM in the background, so the 2 s loop never waits for the model."""
+    def __init__(self, db_name):
+        super().__init__(daemon=True)
+        self.db_name, self.q, self.db = db_name, queue.Queue(), None
+        self.start()
+
+    def submit(self, inc, data):
+        self.q.put((inc, inc.narrated, data))
+
+    def run(self):
+        while True:
+            inc, key, data = self.q.get()
+            try:
+                text = llm_narrative(data)
+                if text and inc.narrated == key:   # skip if the incident changed while the model was thinking
+                    inc.narrative = text
+                    self.db = self.db or psycopg.connect(dsn(self.db_name), autocommit=True)
+                    self.db.execute("UPDATE incidents SET body = jsonb_set(body, '{narrative}', to_jsonb(%s::text)) WHERE incident_id=%s",
+                                    (text, inc.id))
+                    log.info("narrative for %s written by the model", inc.id)
+            except Exception as e:   # model or db down: the deterministic text stays
+                log.warning("narrative for %s kept deterministic: %s", inc.id, e)
+                self.db = None
+
+
 class Region:
     def __init__(self, name, overrides):
         # one engine per region: Globex (EU) signals never touch the India engine or database
@@ -35,6 +62,7 @@ class Region:
         self.engine = Engine(lambda tenant: Thresholds.with_overrides(self.overrides.get(tenant)))
         self.detector = Detector(self.engine)
         self.manager = Manager(self.engine, self.detector)
+        self.narrator = Narrator("airlock_" + name)
         self.db = psycopg.connect(dsn("airlock_" + name), autocommit=True)
         for stmt in filter(None, (x.strip() for x in SCHEMA.split(";"))):
             try:
@@ -88,6 +116,10 @@ class Region:
                              json.dumps(body), "closed" if a.closed else ("suppressed" if a.suppressed_reason else "open"), a.started))
             log.info("alert %s %s [%s/%s] river=%.2f agrees=%s", kind, a.title, a.kind, a.severity, a.second_opinion, a.agrees)
         for kind, inc in self.manager.step(now):
+            if kind != "close" and inc.narrated != (inc.title(), inc.severity()):   # narrative is written when an incident opens or changes class
+                inc.narrated = (inc.title(), inc.severity())
+                inc.narrative = deterministic_narrative(inc.to_contract().model_dump())
+                self.narrator.submit(inc, inc.to_contract().model_dump())
             c = inc.to_contract()
             self.db.execute("""INSERT INTO incidents(incident_id,tenant_id,body,status,started_at,updated_at) VALUES(%s,%s,%s,%s,to_timestamp(%s),now())
                                ON CONFLICT(incident_id) DO UPDATE SET body=EXCLUDED.body, status=EXCLUDED.status, updated_at=now()""",

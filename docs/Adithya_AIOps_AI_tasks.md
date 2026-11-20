@@ -150,10 +150,10 @@ contribution % and the confidence formula. Write incidents in the contract shape
 - **Done when:** a 👎 stops repeats of that alert, and a database slowdown lights its dependents.
 
 #### T10. Head-office AI + narratives · PRD #21, §AI assistants
-- [ ] Ollama via the OpenAI Python client.
-- [ ] Input: the incident JSON + a 10-minute metric summary for the **logged-in tenant only**.
-- [ ] Rules: answer only from evidence and cite evidence IDs. For anything else, say "I don't have that, raw data stays in the customer's environment."
-- [ ] Pre-write the narrative when an incident opens.
+- [x] Ollama via the OpenAI Python client.
+- [x] Input: the incident JSON + a 10-minute metric summary for the **logged-in tenant only**.
+- [x] Rules: answer only from evidence and cite evidence IDs. For anything else, say "I don't have that, raw data stays in the customer's environment."
+- [x] Pre-write the narrative when an incident opens.
 - **Done when:** asked "What password did the attacker use?", it refuses with that reason. Asked "Why is Shop A red?", it answers with evidence tags.
 
 ```text
