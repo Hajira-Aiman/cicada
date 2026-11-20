@@ -100,3 +100,8 @@ def test_grounded_answer_drops_a_stray_refusal_sentence_and_incident_status_is_a
     out = ask("acme", "Why is it red?", load=lambda t: FACTS, llm=lambda s, u: f"{REFUSAL} Latency is high [health:host-1].")
     assert REFUSAL not in out["answer"] and out["evidence_ids"] == ["health:host-1"]
     assert "(status closed)" in incident_facts(INC, "closed")[0][1] and "(status" not in incident_facts(INC)[0][1]
+
+
+def test_answer_that_is_only_tags_falls_back_to_the_cited_fact():
+    out = ask("acme", "Why is it red?", load=lambda t: FACTS, llm=lambda s, u: f"{REFUSAL} [health:host-1]")
+    assert "host-1 is Poor" in out["answer"] and out["evidence_ids"] == ["health:host-1"]

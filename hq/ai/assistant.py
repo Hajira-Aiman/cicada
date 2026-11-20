@@ -121,7 +121,10 @@ def ask(tenant, question, llm=llm_chat, load=load_evidence):
         cited = list(dict.fromkeys(t for t in TAG.findall(text) if t in ids))
         text = TAG.sub(lambda m: m.group(0) if m.group(1) in ids else "", text).replace("  ", " ").strip()
         if cited:   # a grounded answer must not also carry the refusal sentence
-            return {"answer": text.replace(REFUSAL, "").strip(), "evidence_ids": cited}
+            text = text.replace(REFUSAL, "").strip()
+            if len(TAG.sub("", text).strip()) < 8:   # only tags left (the model refused and cited): say what the evidence says
+                text = " ".join(t for i, t in facts if i in cited[:2])
+            return {"answer": text, "evidence_ids": cited}
         if REFUSAL in text:
             return {"answer": text, "evidence_ids": []}
     return {"answer": REFUSAL, "evidence_ids": []}   # could not ground the answer in evidence
