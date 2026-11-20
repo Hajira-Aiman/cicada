@@ -44,3 +44,28 @@ def test_tailer_skips_history_when_guard_ran_before_but_has_no_saved_position(tm
     assert t.read_new_lines() == []
     p.write_bytes(b"old\nnew\n")
     assert t.read_new_lines() == ["new"]
+
+
+def test_engine_retires_silent_sources_only():
+    from hq.aiops.engine import Engine
+    e = Engine()
+    e.ingest("acme", "host-old", 1000.0, 1000.0, {"cpu_pct": 10.0})
+    e.ingest("acme", "host-live", 1590.0, 1590.0, {"cpu_pct": 10.0})
+    assert e.retire(1599.0) == []                      # old one silent 599 s: still shown (offline)
+    assert e.retire(1601.0) == [("acme", "host-old")]  # 601 s: forgotten, with its baselines
+    assert ("acme", "host-live") in e.src and not any(k[1] == "host-old" for k in e.base)
+
+
+def test_packet_loss_probe_counts_refused_connections_and_is_fast():
+    import socket, time
+    from guard.thin_slice import GuardThinSlice
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(16)
+    up_port = srv.getsockname()[1]
+    dead = socket.socket(); dead.bind(("127.0.0.1", 0)); down_port = dead.getsockname()[1]; dead.close()
+    probe = GuardThinSlice.measure_packet_loss
+    stub = type("G", (), {"_packet_loss_override": None})()
+    t0 = time.time()
+    assert probe(stub, host="127.0.0.1", port=up_port) == 0.0
+    assert probe(stub, host="127.0.0.1", port=down_port) == 100.0
+    assert time.time() - t0 < 3
+    srv.close()

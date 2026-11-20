@@ -51,12 +51,13 @@ export async function syncOnce() {
     const rows = health.health.filter((h) => h.tenant_id === r.tenant_id);
     const worst = rows.reduce((w, h) => Math.max(w, RANK[h.state] ?? 0), 0);
     const bad = rows.filter((h) => (RANK[h.state] ?? 0) === worst);
+    const silentS = (Date.now() - new Date(r.last_seen).getTime()) / 1000;   // payloads stopped arriving
     const rep = reported[r.guard_id] || {};   // the guard's own health, as sent in its newest payload
     guards[r.guard_id] = {
       guard_id: r.guard_id, tenant_id: r.tenant_id, region: region[r.tenant_id] || 'in',
       source: (rows.find((h) => h.source.startsWith('host-')) || rows[0])?.source || '—',
-      state: rows.length ? cap(Object.keys(RANK).find((k) => RANK[k] === worst)!) : 'Good',
-      reasons: [...new Set(bad.flatMap((h) => (worst > 1 ? h.reasons : [])))],
+      state: silentS > 60 ? 'Offline' : rows.length ? cap(Object.keys(RANK).find((k) => RANK[k] === worst)!) : 'Good',
+      reasons: silentS > 60 ? [`no payload for ${Math.round(silentS)} s`] : [...new Set(bad.flatMap((h) => (worst > 1 ? h.reasons : [])))],
       since: bad[0]?.since || r.last_seen, last_seen: r.last_seen,
       guard_version: rep.guard_version ?? '—', guard_cpu_pct: rep.guard_cpu_pct ?? 0, guard_mem_mb: rep.guard_mem_mb ?? 0,
       buffer_depth: rep.buffer_depth ?? Math.max(0, r.sent_count - r.received_count),

@@ -45,6 +45,7 @@ class Thresholds:
     enter_s: float = 6.0        # bad data this long before entering a worse state
     exit_s: float = 20.0        # good data this long before returning to a better one
     event_hold_s: float = 10.0  # how long an event keeps its health effect
+    retire_s: float = 600.0     # a source silent this long is forgotten (shown offline until then)
 
     @classmethod
     def with_overrides(cls, o: dict | None):
@@ -173,6 +174,18 @@ class Engine:
         st.committed, st.reasons, st.pending, st.since = raw, reasons, None, now
         return Change(tenant_id=tenant, source=source, state=raw, old_state=old, reasons=reasons,
                             at=datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    def retire(self, now):
+        """Forget sources that have been silent for retire_s so a replaced or removed host does not stay 'poor' forever.
+        Returns [(tenant, source)] retired; a source that comes back simply starts fresh."""
+        gone = [(t, s) for (t, s), st in self.src.items() if now - (st.last_arrival or 0) >= self.th(t).retire_s]
+        for t, s in gone:
+            del self.src[(t, s)]
+            for k in [k for k in self.base if k[:2] == (t, s)]:
+                del self.base[k]
+            for k in [k for k in self.relaxed if k[:2] == (t, s)]:
+                del self.relaxed[k]
+        return gone
 
     def evaluate(self, now):
         """Run every source once; returns the committed state changes."""

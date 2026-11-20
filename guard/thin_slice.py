@@ -14,6 +14,7 @@ import socket
 import uuid
 import hashlib
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from typing import List, Optional, Tuple
@@ -285,10 +286,11 @@ class GuardThinSlice:
         host: Optional[str] = None,
         port: Optional[int] = None,
         count: int = 10,
-        timeout: float = 0.05,
+        timeout: float = 0.5,
     ) -> float:
         """
-        Sends 10 small TCP connection attempts to the head-office ingest host:port.
+        Sends 10 small TCP connection attempts to the head-office ingest host:port, in parallel so a dead link costs one
+        timeout, not ten. 0.5 s: on hotspot Wi-Fi a healthy connect can exceed 50 ms and was being counted as loss.
         Reports failed share as a percent (0.0 to 100.0).
         """
         override = getattr(self, "_packet_loss_override", None)
@@ -300,17 +302,15 @@ class GuardThinSlice:
             host = host or h
             port = port or p
 
-        failed = 0
-        for _ in range(count):
+        def attempt(_) -> int:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(timeout)
-                err = s.connect_ex((host, port))
-                if err != 0:
-                    failed += 1
-                s.close()
-            except Exception:
-                failed += 1
+                with socket.create_connection((host, port), timeout=timeout):
+                    return 0
+            except OSError:
+                return 1
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            failed = sum(pool.map(attempt, range(count)))
 
         return round((failed / float(count)) * 100.0, 1)
 

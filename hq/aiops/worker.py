@@ -73,6 +73,10 @@ class Region:
                 log.warning("%s: no rights to create tables (limited role); Sahiti's init script must create them", name)
                 break
         self.cursor = datetime.fromtimestamp(time.time() - REPLAY_S, timezone.utc)
+        try:   # health_current is derived from engine memory; rows left by a previous run describe sources this run has not seen
+            self.db.execute("DELETE FROM health_current")
+        except psycopg.Error:
+            pass
 
     def connect(self):
         self.db = psycopg.connect(dsn("airlock_" + self.name), autocommit=True)
@@ -130,6 +134,9 @@ class Region:
             self.detector.observe(t, s)
         if replay:
             return
+        for t, s in self.engine.retire(now):
+            self.db.execute("DELETE FROM health_current WHERE tenant_id=%s AND source=%s", (t, s))
+            log.info("retired silent source %s/%s", t, s)
         for c in self.engine.evaluate(now):
             self.db.execute("INSERT INTO health_history(tenant_id,source,state,old_state,reasons,at) VALUES(%s,%s,%s,%s,%s,%s)",
                             (c.tenant_id, c.source, c.state, c.old_state, json.dumps(c.reasons), c.at))
