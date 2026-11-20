@@ -5,7 +5,7 @@ Integrates with Ingest event notifications to push live telemetry.
 """
 
 import asyncio
-from typing import Any, Callable, Coroutine, Dict
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from hq.ingest.service import add_ingest_listener
 
@@ -57,6 +57,76 @@ class Broadcaster:
             loop.create_task(self.broadcast(event))
         except RuntimeError:
             pass
+
+    async def push_health_change(
+        self, tenant_id: str, source: str, state: str, old_state: Optional[str], reasons: List[str], at: str
+    ):
+        event = {
+            "event_type": "health_change",
+            "tenant_id": tenant_id,
+            "timestamp": at,
+            "payload": {
+                "tenant_id": tenant_id,
+                "source": source,
+                "state": state,
+                "old_state": old_state,
+                "reasons": reasons,
+                "at": at,
+            },
+        }
+        await self.broadcast(event)
+
+    async def push_incident(
+        self, event_type: str, tenant_id: str, incident_id: str, body: Dict[str, Any], status: str, timestamp: str
+    ):
+        event = {
+            "event_type": event_type,  # incident_opened or incident_updated
+            "tenant_id": tenant_id,
+            "timestamp": timestamp,
+            "payload": {
+                "incident_id": incident_id,
+                "tenant_id": tenant_id,
+                "body": body,
+                "status": status,
+                "timestamp": timestamp,
+            },
+        }
+        await self.broadcast(event)
+
+    async def push_alert_opened(
+        self, tenant_id: str, alert_id: str, source: str, title: str, severity: str, body: str, created_at: str
+    ):
+        event = {
+            "event_type": "alert_opened",
+            "tenant_id": tenant_id,
+            "timestamp": created_at,
+            "payload": {
+                "alert_id": alert_id,
+                "tenant_id": tenant_id,
+                "source": source,
+                "title": title,
+                "severity": severity,
+                "body": body,
+                "created_at": created_at,
+            },
+        }
+        await self.broadcast(event)
+
+    async def push_counters(self, tenant_id: str, raw_alerts: int, incidents: int, flaps_prevented: int):
+        from datetime import datetime, timezone
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        event = {
+            "event_type": "counters",
+            "tenant_id": tenant_id,
+            "timestamp": now_iso,
+            "payload": {
+                "tenant_id": tenant_id,
+                "raw_alerts": raw_alerts,
+                "incidents": incidents,
+                "flaps_prevented": flaps_prevented,
+            },
+        }
+        await self.broadcast(event)
 
 
 broadcaster = Broadcaster()

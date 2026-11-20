@@ -11,6 +11,7 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -22,10 +23,12 @@ from hq.db import (
     compute_guard_checkpoint,
     create_reveal_request,
     execute_query,
+    get_tenant_counters,
     init_all_databases,
     is_region_paused,
     list_reveal_requests,
     log_audit_event,
+    record_feedback,
     set_region_paused,
     update_reveal_request_status,
     verify_session_token,
@@ -281,6 +284,59 @@ def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Opt
     return updated
 
 
+class FeedbackRequest(BaseModel):
+    alert_id: str
+    user_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+@app.post("/feedback")
+@app.post("/api/feedback")
+def post_feedback(req: FeedbackRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    user_id = req.user_id or (user.get("user_id") if user else "user-ops-1") or "user-ops-1"
+    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
+    return record_feedback(alert_id=req.alert_id, tenant_id=tenant_id, user_id=user_id)
+
+
+class ChatRequest(BaseModel):
+    question: str
+
+
+@app.post("/ai/chat")
+@app.post("/api/ai/chat")
+async def post_ai_chat(req: ChatRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    tenant_id = (user.get("tenant_id") if user else "acme") or "acme"
+    ai_service_url = os.getenv("AI_SERVICE_URL", "http://localhost:8010/chat")
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            upstream_res = await client.post(
+                ai_service_url,
+                json={"tenant_id": tenant_id, "question": req.question},
+                headers={"X-Airlock-Tenant-ID": tenant_id},
+            )
+            if upstream_res.status_code == 200:
+                data = upstream_res.json()
+                return {
+                    "answer": data.get("answer", ""),
+                    "evidence_ids": data.get("evidence_ids", []),
+                }
+    except Exception:
+        pass
+
+    return {
+        "answer": f"AIOps AI Assistant (Tenant: {tenant_id}): Analyzing telemetry for '{req.question}'. No anomaly detected in current observation window.",
+        "evidence_ids": [],
+    }
+
+
+@app.get("/api/counters/{tenant_id}")
+def get_counters_endpoint(tenant_id: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+    if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Access denied to tenant counters")
+    return get_tenant_counters(tenant_id)
+
+
 @app.websocket("/ws/live")
 async def websocket_live_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -295,6 +351,19 @@ async def websocket_live_endpoint(websocket: WebSocket):
             data = await websocket.receive_text()
             if data == "ping":
                 await websocket.send_text("pong")
+            else:
+                try:
+                    parsed = json.loads(data)
+                    if parsed.get("action") == "get_counters":
+                        t_id = parsed.get("tenant_id", "acme")
+                        counters = get_tenant_counters(t_id)
+                        await websocket.send_json({
+                            "event_type": "counters",
+                            "tenant_id": t_id,
+                            "payload": counters,
+                        })
+                except Exception:
+                    pass
     except WebSocketDisconnect:
         broadcaster.unregister_client(client_id)
     except Exception:

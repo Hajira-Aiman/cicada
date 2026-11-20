@@ -1118,3 +1118,76 @@ def update_reveal_request_status(
         (request_id,),
     )
     return rows[0] if rows else None
+
+
+def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, Any]:
+    """Records user thumbs-down feedback for an alert/incident into the regional database."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO feedback (alert_id, tenant_id, user_id, at)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (alert_id) DO UPDATE SET user_id = EXCLUDED.user_id, at = EXCLUDED.at;
+                    """,
+                    (alert_id, tenant_id, user_id, now_iso),
+                )
+            conn.commit()
+
+    conn_sq = get_sqlite_conn(db_name)
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT OR REPLACE INTO feedback (alert_id, tenant_id, user_id, at)
+        VALUES (?, ?, ?, ?);
+        """,
+        (alert_id, tenant_id, user_id, now_iso),
+    )
+    conn_sq.commit()
+
+    log_audit_event(
+        actor=user_id,
+        action="feedback_submitted",
+        tenant_id=tenant_id,
+        details={"alert_id": alert_id, "user_id": user_id, "at": now_iso},
+    )
+
+    return {
+        "status": "recorded",
+        "alert_id": alert_id,
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "at": now_iso,
+    }
+
+
+def get_tenant_counters(tenant_id: str) -> Dict[str, Any]:
+    """Aggregates telemetry counters: raw alerts N, incidents M, flaps prevented."""
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+
+    q_alerts = "SELECT COUNT(*) as count FROM aiops_alerts WHERE tenant_id = %s;" if is_postgres_available() else "SELECT COUNT(*) as count FROM aiops_alerts WHERE tenant_id = ?;"
+    r_alerts = execute_query(db_name, q_alerts, (tenant_id,))
+    raw_alerts = int(r_alerts[0]["count"]) if r_alerts else 0
+
+    q_inc = "SELECT COUNT(*) as count FROM incidents WHERE tenant_id = %s;" if is_postgres_available() else "SELECT COUNT(*) as count FROM incidents WHERE tenant_id = ?;"
+    r_inc = execute_query(db_name, q_inc, (tenant_id,))
+    incidents = int(r_inc[0]["count"]) if r_inc else 0
+
+    q_flaps = "SELECT COALESCE(SUM(flaps_prevented), 0) as total FROM health_current WHERE tenant_id = %s;" if is_postgres_available() else "SELECT COALESCE(SUM(flaps_prevented), 0) as total FROM health_current WHERE tenant_id = ?;"
+    r_flaps = execute_query(db_name, q_flaps, (tenant_id,))
+    flaps = int(r_flaps[0]["total"]) if r_flaps else 0
+
+    return {
+        "tenant_id": tenant_id,
+        "raw_alerts": raw_alerts,
+        "incidents": incidents,
+        "flaps_prevented": flaps,
+    }
