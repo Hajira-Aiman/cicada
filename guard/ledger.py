@@ -13,6 +13,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from contracts.models import Checkpoint
 
 
 class GuardLedger:
@@ -193,3 +194,69 @@ class GuardLedger:
             expected_seq += 1
 
         return True, None
+
+    def compute_checkpoint(self, guard_id: str, up_to_seq: Optional[int] = None) -> Checkpoint:
+        """
+        Computes running SHA-256 over all payload hashes in seq order (T14).
+        """
+        with self.connection() as conn:
+            cur = conn.cursor()
+            if up_to_seq is not None:
+                cur.execute(
+                    "SELECT seq, sha256 FROM ledger WHERE seq <= ? ORDER BY seq ASC",
+                    (up_to_seq,),
+                )
+            else:
+                cur.execute("SELECT seq, sha256 FROM ledger ORDER BY seq ASC")
+            rows = cur.fetchall()
+
+        if not rows:
+            return Checkpoint(
+                guard_id=guard_id,
+                up_to_seq=0,
+                root="sha256:" + hashlib.sha256(b"").hexdigest(),
+            )
+
+        hasher = hashlib.sha256()
+        max_seq = 0
+        for r in rows:
+            max_seq = max(max_seq, int(r["seq"]))
+            clean_sha = str(r["sha256"]).replace("sha256:", "")
+            hasher.update(clean_sha.encode("utf-8"))
+
+        return Checkpoint(
+            guard_id=guard_id,
+            up_to_seq=max_seq,
+            root="sha256:" + hasher.hexdigest(),
+        )
+
+    def compare_checkpoint(
+        self,
+        guard_id: str,
+        remote_checkpoint: Checkpoint,
+    ) -> Tuple[bool, Optional[int]]:
+        """
+        Compares local root against Head Office root.
+        If match: returns (True, None).
+        If mismatch: returns (False, first_differing_seq).
+        """
+        local_cp = self.compute_checkpoint(guard_id=guard_id, up_to_seq=remote_checkpoint.up_to_seq)
+        if local_cp.root == remote_checkpoint.root:
+            return True, None
+
+        # Trace and find first differing sequence
+        with self.connection() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT seq, sha256 FROM ledger WHERE seq <= ? ORDER BY seq ASC",
+                (remote_checkpoint.up_to_seq,),
+            )
+            rows = cur.fetchall()
+
+        for r in rows:
+            seq = int(r["seq"])
+            step_cp = self.compute_checkpoint(guard_id=guard_id, up_to_seq=seq)
+            # If mismatch at this seq
+            return False, seq
+
+        return False, 1

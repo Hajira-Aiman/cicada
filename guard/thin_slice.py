@@ -37,6 +37,8 @@ from guard.raw_store import RawStore
 from guard.scrubber import Scrubber
 from guard.detectors import AuthDetector, PowerDetector, ChangeDetector
 from guard.log_tailer import LogTailer
+from guard.policy_gate import PolicyGate
+from contracts.models import Checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("airlock-guard")
@@ -96,6 +98,9 @@ class GuardThinSlice:
         )
         shop_log_path = getattr(self.config, "SHOP_LOG_PATH", "data/shop-api.log")
         self.log_tailer = LogTailer(log_path=shop_log_path, guard=self)
+        self.policy_gate = PolicyGate(scrubber=self.scrubber)
+        self.last_checkpoint_time: float = 0.0
+        self.last_checkpoint: Optional[Checkpoint] = None
 
         # Network I/O counter baseline
         net = psutil.net_io_counters()
@@ -403,11 +408,11 @@ class GuardThinSlice:
         # Serialize body to exact JSON bytes
         body_json = payload.model_dump_json(by_alias=True)
 
-        # Pre-send policy gate: scan for canaries or unmasked secrets (T5, T10)
-        leak_detected, leak_reason = self.scrubber.contains_canary_or_secret(body_json)
-        if leak_detected:
-            logger.critical(f"POLICY GATE VIOLATION: {leak_reason}. Egress payload BLOCKED.")
-            raise ValueError(f"Pre-send policy violation: {leak_reason}")
+        # Policy gate inspection: schema contract + canary/secret check (T4, T10)
+        valid, reason = self.policy_gate.inspect_payload(payload, body_json_str=body_json)
+        if not valid:
+            logger.critical(f"POLICY GATE VIOLATION: {reason}. Egress payload BLOCKED.")
+            raise ValueError(f"Pre-send policy violation: {reason}")
 
         body_bytes = body_json.encode("utf-8")
 
@@ -518,6 +523,19 @@ class GuardThinSlice:
             )
         return None
 
+    def maybe_publish_checkpoint(self, now: Optional[float] = None) -> Optional[Checkpoint]:
+        """
+        Every 60s computes and publishes running SHA-256 checkpoint {guard_id, up_to_seq, root} (T14).
+        """
+        current_time = now if now is not None else time.time()
+        if self.last_checkpoint_time == 0.0 or (current_time - self.last_checkpoint_time) >= 60.0:
+            cp = self.ledger.compute_checkpoint(guard_id=self.config.GUARD_ID)
+            self.last_checkpoint_time = current_time
+            self.last_checkpoint = cp
+            logger.info(f"Published Checkpoint: guard_id={cp.guard_id} up_to_seq={cp.up_to_seq} root={cp.root}")
+            return cp
+        return None
+
 
 def run_loop(
     guard: Optional[GuardThinSlice] = None,
@@ -544,6 +562,7 @@ def run_loop(
                 duration_seconds=interval, probe_client=probe_client
             )
             guard.send_payload(payload, body_bytes, client=ingest_client)
+            guard.maybe_publish_checkpoint()
             iteration += 1
     except KeyboardInterrupt:
         logger.info("Guard stopped by operator.")
