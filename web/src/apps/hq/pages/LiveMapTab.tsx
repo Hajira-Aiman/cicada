@@ -1,5 +1,6 @@
 import React from 'react';
 import { Fallback2D } from '@/three/Fallback2D';
+const LaptopViewer = React.lazy(() => import('@/three/LaptopModel').then(m => ({ default: m.LaptopViewer })));
 
 export const LiveMapTab: React.FC = () => {
   return (
@@ -24,7 +25,9 @@ export const LiveMapTab: React.FC = () => {
       </div>
 
       <div className="flex-1 w-full rounded-xl overflow-hidden border border-white/10">
-        <Fallback2D height="100%" />
+        <React.Suspense fallback={<Fallback2D height="100%" />}>
+          <LaptopViewer />
+        </React.Suspense>
       </div>
     </div>
   );
