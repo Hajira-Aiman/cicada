@@ -27,6 +27,7 @@ class GuardConfig:
     GUARD_DB_PATH: str = os.getenv("GUARD_DB_PATH", "data/guard.db")
     RAW_DB_PATH: str = os.getenv("RAW_DB_PATH", "data/raw.db")
     REVEAL_DB_PATH: str = os.getenv("REVEAL_DB_PATH", "data/reveal.db")
+    SHOP_LOG_PATH: str = os.getenv("SHOP_LOG_PATH", "data/shop-api.log")
     TIMEOUT_SECONDS: float = 5.0
 
 

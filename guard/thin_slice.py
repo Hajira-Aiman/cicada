@@ -36,6 +36,7 @@ from guard.outbox import GuardOutbox
 from guard.raw_store import RawStore
 from guard.scrubber import Scrubber
 from guard.detectors import AuthDetector, PowerDetector, ChangeDetector
+from guard.log_tailer import LogTailer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("airlock-guard")
@@ -93,6 +94,8 @@ class GuardThinSlice:
             pseudonym_mgr=self.pseudonym_mgr,
             host_pseudonym=self.host_pseudonym,
         )
+        shop_log_path = getattr(self.config, "SHOP_LOG_PATH", "data/shop-api.log")
+        self.log_tailer = LogTailer(log_path=shop_log_path, guard=self)
 
         # Network I/O counter baseline
         net = psutil.net_io_counters()
@@ -274,6 +277,9 @@ class GuardThinSlice:
         start_iso = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
         end_iso = end_time.strftime("%Y-%m-%dT%H:%M:%SZ")
         sent_iso = end_iso
+
+        # Tail and process new logs from shop-api (T3, T16)
+        self.log_tailer.process_pending_logs()
 
         # Read host metrics
         cpu_val = float(psutil.cpu_percent(interval=None))
