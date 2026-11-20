@@ -61,3 +61,16 @@ def test_backup_job_bursts_on_half_the_cores_every_minute(monkeypatch):
     monkeypatch.setattr(agent.time, "time", lambda: next(clock))
     agent._run_backup_job(130)
     assert burns and all(d <= 12 and (cores or 0) >= 2 for d, cores in burns)
+
+
+def test_cpu_burner_is_capped_and_low_priority():
+    import psutil
+    from chaos import agent
+    psutil.cpu_percent(None)
+    import threading, time
+    t = threading.Thread(target=agent._run_cpu_burner, args=(4, psutil.cpu_count(), 0.5))
+    t.start()
+    time.sleep(2.5)
+    load = psutil.cpu_percent(None)
+    t.join()
+    assert load < 97   # never pinned at 100% like the old burner, so the guard keeps running

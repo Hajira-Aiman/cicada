@@ -47,12 +47,23 @@ _lock = threading.Lock()
 # request-supplied names (service, interface) reach subprocess argv: allow plain identifiers only
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 
-def _run_cpu_burner(duration_s: float, cores: Optional[int] = None):
-    """Pins `cores` cores (default: every core but one, the guard needs one) for duration_s (one busy child process per core; a Python thread would only reach one core)."""
+def _run_cpu_burner(duration_s: float, cores: Optional[int] = None, duty: float = 1.0):
+    """Loads `cores` cores (default: every core but one) for duration_s, each busy `duty` of the time, so duty=0.7 on every core
+    is about 70% CPU overall. One child process per core (a Python thread would only reach one core), at below-normal priority so
+    the guard and the network stack keep getting scheduled while the spike is still clearly visible."""
     import subprocess
     import sys
-    code = f"import time; e = time.time() + {duration_s}; exec('while time.time() < e: pass')"
-    kids = [subprocess.Popen([sys.executable, "-c", code]) for _ in range(cores or max(1, (os.cpu_count() or 2) - 1))]
+    duty = min(1.0, max(0.05, duty))
+    code = (f"import time; e = time.time() + {duration_s}\n"
+            f"while time.time() < e:\n"
+            f"    t = time.time() + 0.1 * {duty}\n"
+            f"    while time.time() < t: pass\n"
+            f"    time.sleep(0.1 * {1 - duty})")
+    flags = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)   # Windows; on Linux the child lowers itself below
+    pre = (lambda: os.nice(10)) if hasattr(os, "nice") else None
+    kids = [subprocess.Popen([sys.executable, "-c", code], creationflags=flags, preexec_fn=pre) if pre else
+            subprocess.Popen([sys.executable, "-c", code], creationflags=flags)
+            for _ in range(cores or max(1, (os.cpu_count() or 2) - 1))]
     for k in kids:
         k.wait()
 
@@ -278,7 +289,11 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
     # Trigger real effect in background worker thread
     p = params or {}
     if name == "cpu_spike":
-        threading.Thread(target=_run_cpu_burner, args=(duration_s,), daemon=True).start()
+        pct = min(95, max(10, int(p.get("target_pct", 70))))   # overall CPU to reach: 70% by default, never pinned at 100%
+        import psutil
+        load = psutil.cpu_percent(interval=0.5)   # what the machine already uses: only add the difference
+        duty = max(0.1, pct - load) / 100.0
+        threading.Thread(target=_run_cpu_burner, args=(duration_s, os.cpu_count() or 2, duty), daemon=True).start()
     elif name in ("brute_force", "login_burst"):
         target_url = p.get("url", SHOP_LOGIN_URL)
         threading.Thread(target=_run_brute_force, args=(duration_s, target_url), daemon=True).start()

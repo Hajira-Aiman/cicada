@@ -13,7 +13,7 @@ export interface ChaosScenario {
 }
 
 export const SCENARIOS: ChaosScenario[] = [
-  { id: 'cpu_spike', name: 'CPU Spike', description: 'Simulates 95% CPU spike on shop target', category: 'attack', endpoint: '/scenarios/cpu_spike' },
+  { id: 'cpu_spike', name: 'CPU Spike', description: 'Pushes the shop laptop to about 70% CPU (low priority, so the guard keeps sending)', category: 'attack', endpoint: '/scenarios/cpu_spike' },
   { id: 'latency', name: 'Latency Spike', description: 'Injects 240ms network latency window', category: 'reliability', endpoint: '/scenarios/latency' },
   { id: 'brute_force', name: 'Brute Force Attack', description: 'Emits 50 failed SSH logins in 2 seconds', category: 'attack', endpoint: '/scenarios/brute_force' },
   { id: 'region_outage', name: 'India Region Pause', description: 'Pauses India Ingest (:8001); verifies guard local buffer', category: 'infrastructure', endpoint: '/api/regions/in/pause' },
