@@ -270,7 +270,18 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 alert_id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL,
                 user_id TEXT NOT NULL,
+                metric TEXT,
+                source TEXT,
                 at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS aiops_baselines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id TEXT NOT NULL,
+                source TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                mean REAL NOT NULL,
+                std REAL NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS guard_reconciliation (
                 guard_id TEXT PRIMARY KEY,
@@ -1196,11 +1207,45 @@ def update_reveal_request_status(
     return rows[0] if rows else None
 
 
-def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, Any]:
+def record_feedback(
+    alert_id: str,
+    tenant_id: str,
+    user_id: str,
+    metric: Optional[str] = None,
+    source: Optional[str] = None,
+) -> Dict[str, Any]:
     """Records user thumbs-down feedback for an alert/incident into the regional database."""
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
     db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+
+    if metric is None or source is None:
+        try:
+            alert_query = (
+                "SELECT body, source FROM aiops_alerts WHERE alert_id = %s;"
+                if is_postgres_available()
+                else "SELECT body, source FROM aiops_alerts WHERE alert_id = ?;"
+            )
+            alert_rows = execute_query(db_name, alert_query, (alert_id,), tenant_id=tenant_id)
+            if alert_rows:
+                r = alert_rows[0]
+                if not source and r.get("source"):
+                    source = r["source"]
+                body_val = r.get("body")
+                if isinstance(body_val, str):
+                    try:
+                        body_val = json.loads(body_val)
+                    except Exception:
+                        body_val = {}
+                if isinstance(body_val, dict):
+                    signals = body_val.get("signals") or []
+                    if signals and isinstance(signals[0], dict):
+                        if not metric:
+                            metric = signals[0].get("name")
+                        if not source:
+                            source = signals[0].get("source")
+        except Exception:
+            pass
 
     if is_postgres_available():
         pool = get_db_pool(db_name)
@@ -1209,21 +1254,21 @@ def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, An
                 with conn.cursor() as cur:
                     cur.execute(
                         """
-                        INSERT INTO feedback (alert_id, tenant_id, user_id, at)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (alert_id) DO UPDATE SET user_id = EXCLUDED.user_id, at = EXCLUDED.at;
+                        INSERT INTO feedback (alert_id, tenant_id, user_id, metric, source, at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (alert_id) DO UPDATE SET user_id = EXCLUDED.user_id, metric = EXCLUDED.metric, source = EXCLUDED.source, at = EXCLUDED.at;
                         """,
-                        (alert_id, tenant_id, user_id, now_iso),
+                        (alert_id, tenant_id, user_id, metric, source, now_iso),
                     )
 
     conn_sq = get_sqlite_conn(db_name)
     cur_sq = conn_sq.cursor()
     cur_sq.execute(
         """
-        INSERT OR REPLACE INTO feedback (alert_id, tenant_id, user_id, at)
-        VALUES (?, ?, ?, ?);
+        INSERT OR REPLACE INTO feedback (alert_id, tenant_id, user_id, metric, source, at)
+        VALUES (?, ?, ?, ?, ?, ?);
         """,
-        (alert_id, tenant_id, user_id, now_iso),
+        (alert_id, tenant_id, user_id, metric, source, now_iso),
     )
     conn_sq.commit()
 
@@ -1231,7 +1276,7 @@ def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, An
         actor=user_id,
         action="feedback_submitted",
         tenant_id=tenant_id,
-        details={"alert_id": alert_id, "user_id": user_id, "at": now_iso},
+        details={"alert_id": alert_id, "user_id": user_id, "metric": metric, "source": source, "at": now_iso},
     )
 
     return {
@@ -1239,8 +1284,34 @@ def record_feedback(alert_id: str, tenant_id: str, user_id: str) -> Dict[str, An
         "alert_id": alert_id,
         "tenant_id": tenant_id,
         "user_id": user_id,
+        "metric": metric,
+        "source": source,
         "at": now_iso,
     }
+
+
+def get_tenant_baselines(tenant_id: str) -> List[Dict[str, Any]]:
+    """Reads baseline normal bands from aiops_baselines table in regional DB."""
+    assigned_reg = get_tenant_assigned_region(tenant_id) or "in"
+    db_name = "airlock_in" if assigned_reg == "in" else "airlock_eu"
+    query = (
+        "SELECT source, metric, mean, std FROM aiops_baselines WHERE tenant_id = %s;"
+        if is_postgres_available()
+        else "SELECT source, metric, mean, std FROM aiops_baselines WHERE tenant_id = ?;"
+    )
+    try:
+        rows = execute_query(db_name, query, (tenant_id,), tenant_id=tenant_id)
+        return [
+            {
+                "source": r["source"],
+                "metric": r["metric"],
+                "mean": float(r["mean"]),
+                "std": float(r["std"]),
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
 
 
 def get_tenant_counters(tenant_id: str) -> Dict[str, Any]:

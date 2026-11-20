@@ -209,7 +209,19 @@ CREATE TABLE IF NOT EXISTS feedback (
     alert_id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL,
     user_id VARCHAR(64) NOT NULL,
+    metric VARCHAR(64),
+    source VARCHAR(64),
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS aiops_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    metric VARCHAR(64) NOT NULL,
+    mean DOUBLE PRECISION NOT NULL,
+    std DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS guard_reconciliation (
@@ -438,7 +450,19 @@ CREATE TABLE IF NOT EXISTS feedback (
     alert_id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL,
     user_id VARCHAR(64) NOT NULL,
+    metric VARCHAR(64),
+    source VARCHAR(64),
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS aiops_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    metric VARCHAR(64) NOT NULL,
+    mean DOUBLE PRECISION NOT NULL,
+    std DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS guard_reconciliation (

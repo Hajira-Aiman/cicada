@@ -32,6 +32,7 @@ from hq.db import (
     get_action_audit_logs,
     get_action_intent,
     get_tenant_assigned_region,
+    get_tenant_baselines,
     get_tenant_counters,
     init_all_databases,
     is_region_paused,
@@ -611,6 +612,8 @@ class FeedbackRequest(BaseModel):
     alert_id: str
     user_id: Optional[str] = None
     tenant_id: Optional[str] = None
+    metric: Optional[str] = None
+    source: Optional[str] = None
 
 
 @app.post("/feedback")
@@ -618,7 +621,23 @@ class FeedbackRequest(BaseModel):
 def post_feedback(req: FeedbackRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
     user_id = req.user_id or (user.get("user_id") if user else "user-ops-1") or "user-ops-1"
     tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
-    return record_feedback(alert_id=req.alert_id, tenant_id=tenant_id, user_id=user_id)
+    return record_feedback(
+        alert_id=req.alert_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        metric=req.metric,
+        source=req.source,
+    )
+
+
+@app.get("/api/baselines/{tenant_id}")
+def get_baselines_endpoint(
+    tenant_id: str,
+    user: Optional[Dict[str, Any]] = Depends(get_optional_user),
+):
+    if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Access denied to tenant baselines")
+    return get_tenant_baselines(tenant_id)
 
 
 class ChatRequest(BaseModel):
@@ -632,7 +651,7 @@ async def post_ai_chat(req: ChatRequest, user: Optional[Dict[str, Any]] = Depend
     ai_service_url = os.getenv("AI_SERVICE_URL", "http://localhost:8010/chat")
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             upstream_res = await client.post(
                 ai_service_url,
                 json={"tenant_id": tenant_id, "question": req.question},
@@ -648,7 +667,7 @@ async def post_ai_chat(req: ChatRequest, user: Optional[Dict[str, Any]] = Depend
         pass
 
     return {
-        "answer": f"AIOps AI Assistant (Tenant: {tenant_id}): Analyzing telemetry for '{req.question}'. No anomaly detected in current observation window.",
+        "answer": f"AI Assistant is currently unavailable. Telemetry indicates normal operation within region for tenant '{tenant_id}'.",
         "evidence_ids": [],
     }
 

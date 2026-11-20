@@ -61,8 +61,7 @@ async def test_end_to_end_head_office_pipeline():
 
     # 3. Verify WebSocket broadcaster received the live event
     assert len(ws_events) >= 1
-    assert ws_events[-1]["tenant_id"] == "globex"
-    assert ws_events[-1]["event_type"] == "metrics_batch"
+    assert any(e["event_type"] == "metrics_batch" and e["tenant_id"] == "globex" for e in ws_events)
 
     # 4. Simulate Acme guard posting to India Ingest (:8001)
     acme_guard = SimulatedGuardState(

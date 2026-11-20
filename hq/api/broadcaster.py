@@ -14,6 +14,8 @@ class Broadcaster:
     def __init__(self):
         # Key: client_id, Value: async send callback
         self.active_clients: Dict[str, Callable[[Dict[str, Any]], Coroutine[Any, Any, None]]] = {}
+        self._incident_states: Dict[str, Dict[str, Any]] = {}
+        self._incident_last_sent: Dict[str, float] = {}
 
     def register_client(
         self,
@@ -98,6 +100,42 @@ class Broadcaster:
     async def push_incident(
         self, event_type: str, tenant_id: str, incident_id: str, body: Dict[str, Any], status: str, timestamp: str
     ):
+        if event_type == "incident_updated":
+            import time
+            now = time.time()
+            signals = tuple(sorted(str(s) for s in body.get("signals", [])))
+            changes_before = tuple(sorted(str(c) for c in body.get("changes_before", [])))
+            sig = {
+                "title": body.get("title"),
+                "severity": body.get("severity"),
+                "confidence": body.get("confidence"),
+                "status": status,
+                "signals": signals,
+                "changes_before": changes_before,
+            }
+            last_sig = self._incident_states.get(incident_id)
+            last_time = self._incident_last_sent.get(incident_id, 0.0)
+
+            # Throttle if title, severity, confidence, signal set, changes_before, status unchanged AND < 10s elapsed
+            if last_sig == sig and (now - last_time) < 10.0:
+                return
+
+            self._incident_states[incident_id] = sig
+            self._incident_last_sent[incident_id] = now
+        elif event_type == "incident_opened":
+            import time
+            signals = tuple(sorted(str(s) for s in body.get("signals", [])))
+            changes_before = tuple(sorted(str(c) for c in body.get("changes_before", [])))
+            self._incident_states[incident_id] = {
+                "title": body.get("title"),
+                "severity": body.get("severity"),
+                "confidence": body.get("confidence"),
+                "status": status,
+                "signals": signals,
+                "changes_before": changes_before,
+            }
+            self._incident_last_sent[incident_id] = time.time()
+
         event = {
             "event_type": event_type,  # incident_opened or incident_updated
             "tenant_id": tenant_id,
