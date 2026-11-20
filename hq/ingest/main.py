@@ -34,7 +34,8 @@ def create_ingest_app(region: str = "eu") -> FastAPI:
             timestamp_str=x_airlock_timestamp,
         )
         if status_code != 200:
-            raise HTTPException(status_code=status_code, detail=result.get("error", "Ingest error"))
+            err_msg = result.get("error", "Ingest error")
+            return JSONResponse(status_code=status_code, content={"error": err_msg, "detail": err_msg})
         return JSONResponse(status_code=200, content=result)
 
     return app

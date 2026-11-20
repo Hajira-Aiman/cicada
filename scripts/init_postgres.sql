@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS tenants (
     tenant_id VARCHAR(64) PRIMARY KEY,
     name VARCHAR(128) NOT NULL,
     assigned_region VARCHAR(16) NOT NULL,
+    pinned_policy_hash VARCHAR(128),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -37,13 +38,21 @@ CREATE TABLE IF NOT EXISTS audit_log (
     timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS leak_counters (
+    tenant_id VARCHAR(64) PRIMARY KEY,
+    leak_count INT DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE tenants ADD COLUMN IF NOT EXISTS pinned_policy_hash VARCHAR(128);
+
 -- Seed initial tenants & guards
-INSERT INTO tenants (tenant_id, name, assigned_region) VALUES
-    ('acme', 'Acme Shop A', 'in'),
-    ('globex', 'Globex Shop B', 'eu'),
-    ('contoso', 'Contoso Organizer', 'in'),
-    ('guests', 'Judges Phones', 'eu')
-ON CONFLICT (tenant_id) DO NOTHING;
+INSERT INTO tenants (tenant_id, name, assigned_region, pinned_policy_hash) VALUES
+    ('acme', 'Acme Shop A', 'in', 'sha256:v1-default-policy,sha256:ab1289cf001e35a9'),
+    ('globex', 'Globex Shop B', 'eu', 'sha256:ab1289cf001e35a9,sha256:v1-default-policy'),
+    ('contoso', 'Contoso Organizer', 'in', 'sha256:ab1289cf001e35a9'),
+    ('guests', 'Judges Phones', 'eu', 'sha256:v1-default-policy')
+ON CONFLICT (tenant_id) DO UPDATE SET pinned_policy_hash = EXCLUDED.pinned_policy_hash;
 
 INSERT INTO guards (guard_id, tenant_id, hmac_secret) VALUES
     ('guard-acme-01', 'acme', 'sec-acme-super-secret-key-2026'),
@@ -142,6 +151,18 @@ CREATE TABLE IF NOT EXISTS feedback (
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS guard_reconciliation (
+    guard_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    sent_count BIGINT DEFAULT 0,
+    received_count BIGINT DEFAULT 0,
+    duplicate_count BIGINT DEFAULT 0,
+    max_seq BIGINT DEFAULT 0,
+    last_hash VARCHAR(128),
+    gaps JSONB DEFAULT '[]'::jsonb,
+    last_seen TIMESTAMP WITH TIME ZONE
+);
+
 -- Database 3: airlock_eu (Europe Region)
 CREATE DATABASE airlock_eu;
 \c airlock_eu;
@@ -231,4 +252,16 @@ CREATE TABLE IF NOT EXISTS feedback (
     tenant_id VARCHAR(64) NOT NULL,
     user_id VARCHAR(64) NOT NULL,
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS guard_reconciliation (
+    guard_id VARCHAR(64) PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    sent_count BIGINT DEFAULT 0,
+    received_count BIGINT DEFAULT 0,
+    duplicate_count BIGINT DEFAULT 0,
+    max_seq BIGINT DEFAULT 0,
+    last_hash VARCHAR(128),
+    gaps JSONB DEFAULT '[]'::jsonb,
+    last_seen TIMESTAMP WITH TIME ZONE
 );

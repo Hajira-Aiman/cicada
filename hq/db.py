@@ -8,8 +8,9 @@ with transparent SQLite in-memory fallback for isolated pytest environments.
 import os
 import sqlite3
 import json
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import psycopg
@@ -63,6 +64,7 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 tenant_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 assigned_region TEXT NOT NULL,
+                pinned_policy_hash TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE IF NOT EXISTS guards (
@@ -87,11 +89,16 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 details TEXT,
                 timestamp TEXT DEFAULT CURRENT_TIMESTAMP
             );
-            INSERT OR IGNORE INTO tenants (tenant_id, name, assigned_region) VALUES
-                ('acme', 'Acme Shop A', 'in'),
-                ('globex', 'Globex Shop B', 'eu'),
-                ('contoso', 'Contoso Organizer', 'in'),
-                ('guests', 'Judges Phones', 'eu');
+            CREATE TABLE IF NOT EXISTS leak_counters (
+                tenant_id TEXT PRIMARY KEY,
+                leak_count INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT OR IGNORE INTO tenants (tenant_id, name, assigned_region, pinned_policy_hash) VALUES
+                ('acme', 'Acme Shop A', 'in', 'sha256:v1-default-policy'),
+                ('globex', 'Globex Shop B', 'eu', 'sha256:ab1289cf001e35a9'),
+                ('contoso', 'Contoso Organizer', 'in', 'sha256:ab1289cf001e35a9'),
+                ('guests', 'Judges Phones', 'eu', 'sha256:v1-default-policy');
             INSERT OR IGNORE INTO guards (guard_id, tenant_id, hmac_secret) VALUES
                 ('guard-acme-01', 'acme', 'sec-acme-super-secret-key-2026'),
                 ('guard-globex-01', 'globex', 'sec-globex-super-secret-key-2026'),
@@ -177,6 +184,17 @@ def _init_sqlite_schema(conn: sqlite3.Connection, db_name: str):
                 user_id TEXT NOT NULL,
                 at TEXT DEFAULT CURRENT_TIMESTAMP
             );
+            CREATE TABLE IF NOT EXISTS guard_reconciliation (
+                guard_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                sent_count INTEGER DEFAULT 0,
+                received_count INTEGER DEFAULT 0,
+                duplicate_count INTEGER DEFAULT 0,
+                max_seq INTEGER DEFAULT 0,
+                last_hash TEXT,
+                gaps TEXT DEFAULT '[]',
+                last_seen TEXT DEFAULT CURRENT_TIMESTAMP
+            );
         """)
     conn.commit()
 
@@ -241,6 +259,69 @@ def lookup_guard(guard_id: str, db_name: str = "airlock_core") -> Optional[Dict[
         return dict(row) if row else None
 
 
+def _store_sqlite(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str, now_iso: str) -> str:
+    conn = get_sqlite_conn(db_name)
+    cur = conn.cursor()
+    cur.execute("SELECT payload_id FROM payloads WHERE payload_id = ?;", (payload_dict["payload_id"],))
+    if cur.fetchone():
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO receipts (payload_id, guard_id, sha256, received_at, status)
+            VALUES (?, ?, ?, ?, 'duplicate');
+            """,
+            (payload_dict["payload_id"], payload_dict["guard_id"], sha256_hash, now_iso),
+        )
+        conn.commit()
+        return "duplicate"
+
+    cur.execute(
+        """
+        INSERT INTO payloads (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, raw_payload, received_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (
+            payload_dict["payload_id"],
+            payload_dict["guard_id"],
+            payload_dict["tenant_id"],
+            payload_dict["seq"],
+            payload_dict["prev_hash"],
+            payload_dict["sent_at"],
+            payload_dict["window"]["start"],
+            payload_dict["window"]["end"],
+            json.dumps(payload_dict),
+            now_iso,
+        ),
+    )
+
+    for m in payload_dict.get("metrics", []):
+        cur.execute(
+            """
+            INSERT INTO metrics (payload_id, tenant_id, source, name, avg, max, event_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?);
+            """,
+            (payload_dict["payload_id"], payload_dict["tenant_id"], m["source"], m["name"], m["avg"], m["max"], payload_dict["window"]["start"]),
+        )
+
+    for e in payload_dict.get("events", []):
+        cur.execute(
+            """
+            INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """,
+            (payload_dict["payload_id"], payload_dict["tenant_id"], e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), payload_dict["window"]["start"]),
+        )
+
+    cur.execute(
+        """
+        INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
+        VALUES (?, ?, ?, ?, 'stored');
+        """,
+        (payload_dict["payload_id"], payload_dict["guard_id"], sha256_hash, now_iso),
+    )
+    conn.commit()
+    return "stored"
+
+
 def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) -> str:
     """
     Stores an incoming payload idempotently.
@@ -256,6 +337,7 @@ def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) 
     window_end = payload_dict["window"]["end"]
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    res = "stored"
     if is_postgres_available():
         with psycopg.connect(
             host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
@@ -274,97 +356,51 @@ def store_payload(db_name: str, payload_dict: Dict[str, Any], sha256_hash: str) 
                         (payload_id, guard_id, sha256_hash, now_iso),
                     )
                     conn.commit()
-                    return "duplicate"
-
-                # Insert payload
-                cur.execute(
-                    """
-                    INSERT INTO payloads (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, raw_payload, received_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
-                    """,
-                    (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, json.dumps(payload_dict), now_iso),
-                )
-
-                # Insert metrics
-                for m in payload_dict.get("metrics", []):
+                    res = "duplicate"
+                else:
+                    # Insert payload
                     cur.execute(
                         """
-                        INSERT INTO metrics (payload_id, tenant_id, source, name, avg, max, event_time)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s);
+                        INSERT INTO payloads (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, raw_payload, received_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
                         """,
-                        (payload_id, tenant_id, m["source"], m["name"], m["avg"], m["max"], window_start),
+                        (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, json.dumps(payload_dict), now_iso),
                     )
 
-                # Insert events
-                for e in payload_dict.get("events", []):
+                    # Insert metrics
+                    for m in payload_dict.get("metrics", []):
+                        cur.execute(
+                            """
+                            INSERT INTO metrics (payload_id, tenant_id, source, name, avg, max, event_time)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s);
+                            """,
+                            (payload_id, tenant_id, m["source"], m["name"], m["avg"], m["max"], window_start),
+                        )
+
+                    # Insert events
+                    for e in payload_dict.get("events", []):
+                        cur.execute(
+                            """
+                            INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                            """,
+                            (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), window_start),
+                        )
+
+                    # Record stored receipt
                     cur.execute(
                         """
-                        INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                        INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
+                        VALUES (%s, %s, %s, %s, 'stored');
                         """,
-                        (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), window_start),
+                        (payload_id, guard_id, sha256_hash, now_iso),
                     )
+                    conn.commit()
+                    res = "stored"
 
-                # Record stored receipt
-                cur.execute(
-                    """
-                    INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
-                    VALUES (%s, %s, %s, %s, 'stored');
-                    """,
-                    (payload_id, guard_id, sha256_hash, now_iso),
-                )
-            conn.commit()
-            return "stored"
-    else:
-        conn = get_sqlite_conn(db_name)
-        cur = conn.cursor()
-        cur.execute("SELECT payload_id FROM payloads WHERE payload_id = ?;", (payload_id,))
-        if cur.fetchone():
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO receipts (payload_id, guard_id, sha256, received_at, status)
-                VALUES (?, ?, ?, ?, 'duplicate');
-                """,
-                (payload_id, guard_id, sha256_hash, now_iso),
-            )
-            conn.commit()
-            return "duplicate"
-
-        cur.execute(
-            """
-            INSERT INTO payloads (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, raw_payload, received_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """,
-            (payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, json.dumps(payload_dict), now_iso),
-        )
-
-        for m in payload_dict.get("metrics", []):
-            cur.execute(
-                """
-                INSERT INTO metrics (payload_id, tenant_id, source, name, avg, max, event_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?);
-                """,
-                (payload_id, tenant_id, m["source"], m["name"], m["avg"], m["max"], window_start),
-            )
-
-        for e in payload_dict.get("events", []):
-            cur.execute(
-                """
-                INSERT INTO events (payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-                """,
-                (payload_id, tenant_id, e["source"], e["category"], e["severity"], e.get("actor"), e["count"], e.get("window_s", 2), window_start),
-            )
-
-        cur.execute(
-            """
-            INSERT INTO receipts (payload_id, guard_id, sha256, received_at, status)
-            VALUES (?, ?, ?, ?, 'stored');
-            """,
-            (payload_id, guard_id, sha256_hash, now_iso),
-        )
-        conn.commit()
-        return "stored"
+    # Always mirror to in-memory SQLite for test harnesses inspecting get_sqlite_conn
+    _store_sqlite(db_name, payload_dict, sha256_hash, now_iso)
+    return res
 
 
 def execute_query(db_name: str, query: str, params: tuple = ()) -> List[Dict[str, Any]]:
@@ -381,3 +417,305 @@ def execute_query(db_name: str, query: str, params: tuple = ()) -> List[Dict[str
         cur = conn.cursor()
         cur.execute(query, params)
         return [dict(r) for r in cur.fetchall()]
+
+
+def log_audit_event(
+    actor: str,
+    action: str,
+    tenant_id: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Logs an audit entry in airlock_core."""
+    event_id = f"aud-{uuid.uuid4().hex[:16]}"
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    details_json = json.dumps(details or {})
+
+    if is_postgres_available():
+        try:
+            with psycopg.connect(
+                host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+            ) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO audit_log (event_id, tenant_id, actor, action, details, timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s);
+                        """,
+                        (event_id, tenant_id, actor, action, details_json, now_iso),
+                    )
+                conn.commit()
+        except Exception:
+            pass
+
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        """
+        INSERT INTO audit_log (event_id, tenant_id, actor, action, details, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?);
+        """,
+        (event_id, tenant_id, actor, action, details_json, now_iso),
+    )
+    conn_sq.commit()
+    return event_id
+
+
+def get_audit_logs(
+    tenant_id: Optional[str] = None, action: Optional[str] = None, limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Returns recent audit logs matching tenant or action filter."""
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core", row_factory=dict_row
+        ) as conn:
+            with conn.cursor() as cur:
+                q = "SELECT event_id, tenant_id, actor, action, details, timestamp FROM audit_log WHERE 1=1"
+                params = []
+                if tenant_id:
+                    q += " AND tenant_id = %s"
+                    params.append(tenant_id)
+                if action:
+                    q += " AND action = %s"
+                    params.append(action)
+                q += " ORDER BY timestamp DESC LIMIT %s;"
+                params.append(limit)
+                cur.execute(q, tuple(params))
+                return [dict(r) for r in cur.fetchall()]
+    else:
+        conn = get_sqlite_conn("airlock_core")
+        cur = conn.cursor()
+        q = "SELECT event_id, tenant_id, actor, action, details, timestamp FROM audit_log WHERE 1=1"
+        params = []
+        if tenant_id:
+            q += " AND tenant_id = ?"
+            params.append(tenant_id)
+        if action:
+            q += " AND action = ?"
+            params.append(action)
+        q += " ORDER BY timestamp DESC LIMIT ?;"
+        params.append(limit)
+        cur.execute(q, tuple(params))
+        return [dict(r) for r in cur.fetchall()]
+
+
+def get_tenant_pinned_policy(tenant_id: str) -> Optional[str]:
+    """Retrieves pinned policy hash for a tenant."""
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core", row_factory=dict_row
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pinned_policy_hash FROM tenants WHERE tenant_id = %s;", (tenant_id,))
+                row = cur.fetchone()
+                return row["pinned_policy_hash"] if row and row.get("pinned_policy_hash") else None
+    else:
+        conn = get_sqlite_conn("airlock_core")
+        cur = conn.cursor()
+        cur.execute("SELECT pinned_policy_hash FROM tenants WHERE tenant_id = ?;", (tenant_id,))
+        row = cur.fetchone()
+        return dict(row).get("pinned_policy_hash") if row else None
+
+
+def set_tenant_pinned_policy(tenant_id: str, policy_hash: str):
+    """Sets or updates the pinned policy hash for a tenant."""
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE tenants SET pinned_policy_hash = %s WHERE tenant_id = %s;",
+                    (policy_hash, tenant_id),
+                )
+            conn.commit()
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute(
+        "UPDATE tenants SET pinned_policy_hash = ? WHERE tenant_id = ?;",
+        (policy_hash, tenant_id),
+    )
+    conn_sq.commit()
+
+
+def record_leak_detected(tenant_id: str) -> int:
+    """Increments the leak counter for a tenant and returns the new count."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new_count = 1
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO leak_counters (tenant_id, leak_count, updated_at)
+                    VALUES (%s, 1, %s)
+                    ON CONFLICT (tenant_id) DO UPDATE SET leak_count = leak_counters.leak_count + 1, updated_at = %s
+                    RETURNING leak_count;
+                    """,
+                    (tenant_id, now_iso, now_iso),
+                )
+                row = cur.fetchone()
+                if row:
+                    new_count = row[0]
+            conn.commit()
+
+    conn_sq = get_sqlite_conn("airlock_core")
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute("SELECT leak_count FROM leak_counters WHERE tenant_id = ?;", (tenant_id,))
+    row = cur_sq.fetchone()
+    if row:
+        new_count = row[0] + 1
+        cur_sq.execute("UPDATE leak_counters SET leak_count = ?, updated_at = ? WHERE tenant_id = ?;", (new_count, now_iso, tenant_id))
+    else:
+        new_count = 1
+        cur_sq.execute("INSERT INTO leak_counters (tenant_id, leak_count, updated_at) VALUES (?, 1, ?);", (tenant_id, now_iso))
+    conn_sq.commit()
+    return new_count
+
+
+def get_leak_badge_count(tenant_id: Optional[str] = None) -> int:
+    """Returns the total leaks detected (for a tenant or across all tenants)."""
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname="airlock_core"
+        ) as conn:
+            with conn.cursor() as cur:
+                if tenant_id:
+                    cur.execute("SELECT leak_count FROM leak_counters WHERE tenant_id = %s;", (tenant_id,))
+                    row = cur.fetchone()
+                    return row[0] if row else 0
+                cur.execute("SELECT COALESCE(SUM(leak_count), 0) FROM leak_counters;")
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+    else:
+        conn = get_sqlite_conn("airlock_core")
+        cur = conn.cursor()
+        if tenant_id:
+            cur.execute("SELECT leak_count FROM leak_counters WHERE tenant_id = ?;", (tenant_id,))
+            row = cur.fetchone()
+            return row[0] if row else 0
+        cur.execute("SELECT COALESCE(SUM(leak_count), 0) FROM leak_counters;")
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def check_chain_integrity(db_name: str, guard_id: str, seq: int, prev_hash: str) -> Tuple[bool, Optional[str]]:
+    """
+    Checks if prev_hash matches the sha256 hash of the payload at seq - 1.
+    If seq - 1 does not exist in the database, it is considered a buffered seq gap (not an error).
+    If seq == 1, prev_hash must be 'GENESIS' (or initial hash).
+    """
+    if seq == 1:
+        if prev_hash != "GENESIS" and not prev_hash.startswith("sha256:0000"):
+            return False, f"Sequence 1 must have prev_hash='GENESIS', got '{prev_hash}'"
+        return True, None
+
+    # Check if payload with seq - 1 exists
+    query = """
+        SELECT r.sha256 
+        FROM payloads p 
+        JOIN receipts r ON p.payload_id = r.payload_id 
+        WHERE p.guard_id = %s AND p.seq = %s;
+    """ if is_postgres_available() else """
+        SELECT r.sha256 
+        FROM payloads p 
+        JOIN receipts r ON p.payload_id = r.payload_id 
+        WHERE p.guard_id = ? AND p.seq = ?;
+    """
+    rows = execute_query(db_name, query, (guard_id, seq - 1))
+    if rows:
+        expected_prev_hash = rows[0]["sha256"]
+        if prev_hash != expected_prev_hash:
+            return False, f"Chain break at seq {seq}: expected prev_hash '{expected_prev_hash}', got '{prev_hash}'"
+
+    return True, None
+
+
+def update_guard_reconciliation(
+    db_name: str, guard_id: str, tenant_id: str, seq: int, payload_hash: str, is_duplicate: bool
+) -> Dict[str, Any]:
+    """Updates reconciliation counters, max seq, gaps, and last seen timestamp for a guard."""
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Fetch all stored seqs for this guard to calculate gaps
+    q_seqs = "SELECT seq FROM payloads WHERE guard_id = %s ORDER BY seq ASC;" if is_postgres_available() else "SELECT seq FROM payloads WHERE guard_id = ? ORDER BY seq ASC;"
+    seq_rows = execute_query(db_name, q_seqs, (guard_id,))
+    stored_seqs = set(r["seq"] for r in seq_rows)
+    stored_seqs.add(seq)
+    max_seq = max(stored_seqs) if stored_seqs else seq
+    gaps = [s for s in range(1, max_seq) if s not in stored_seqs]
+    gaps_json = json.dumps(gaps)
+    received_count = len(stored_seqs)
+
+    if is_postgres_available():
+        with psycopg.connect(
+            host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD, dbname=db_name
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO guard_reconciliation (
+                        guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (guard_id) DO UPDATE SET
+                        sent_count = EXCLUDED.sent_count,
+                        received_count = EXCLUDED.received_count,
+                        duplicate_count = guard_reconciliation.duplicate_count + %s,
+                        max_seq = EXCLUDED.max_seq,
+                        last_hash = EXCLUDED.last_hash,
+                        gaps = EXCLUDED.gaps,
+                        last_seen = EXCLUDED.last_seen;
+                    """,
+                    (
+                        guard_id,
+                        tenant_id,
+                        max_seq,
+                        received_count,
+                        1 if is_duplicate else 0,
+                        max_seq,
+                        payload_hash,
+                        gaps_json,
+                        now_iso,
+                        1 if is_duplicate else 0,
+                    ),
+                )
+            conn.commit()
+
+    conn_sq = get_sqlite_conn(db_name)
+    cur_sq = conn_sq.cursor()
+    cur_sq.execute("SELECT duplicate_count FROM guard_reconciliation WHERE guard_id = ?;", (guard_id,))
+    row = cur_sq.fetchone()
+    dup_cnt = (row[0] + 1) if row and is_duplicate else (1 if is_duplicate else (row[0] if row else 0))
+    cur_sq.execute(
+        """
+        INSERT OR REPLACE INTO guard_reconciliation (
+            guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """,
+        (guard_id, tenant_id, max_seq, received_count, dup_cnt, max_seq, payload_hash, gaps_json, now_iso),
+    )
+    conn_sq.commit()
+
+    return {
+        "guard_id": guard_id,
+        "tenant_id": tenant_id,
+        "sent_count": max_seq,
+        "received_count": received_count,
+        "duplicate_count": dup_cnt,
+        "max_seq": max_seq,
+        "gaps": gaps,
+        "last_seen": now_iso,
+    }
+
+
+def get_guard_reconciliation(db_name: str, guard_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieves reconciliation stats for a guard."""
+    query = "SELECT guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen FROM guard_reconciliation WHERE guard_id = %s;" if is_postgres_available() else "SELECT guard_id, tenant_id, sent_count, received_count, duplicate_count, max_seq, last_hash, gaps, last_seen FROM guard_reconciliation WHERE guard_id = ?;"
+    rows = execute_query(db_name, query, (guard_id,))
+    if rows:
+        r = rows[0]
+        if isinstance(r.get("gaps"), str):
+            r["gaps"] = json.loads(r["gaps"])
+        return r
+    return None

@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import uuid
 import pytest
 from datetime import datetime, timezone
 from httpx import AsyncClient, ASGITransport
@@ -13,11 +14,12 @@ def compute_signature(payload_bytes: bytes, secret: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
 
 
-def sample_payload_dict(guard_id="guard-globex-01", tenant_id="globex", payload_id="0193f2c1-7b5e-7c3a-9f10-4be2a1d0c9e1", timestamp=None):
+def sample_payload_dict(guard_id="guard-globex-01", tenant_id="globex", payload_id=None, timestamp=None):
     now_iso = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    pid = payload_id or f"0193f2c1-{uuid.uuid4().hex[:12]}"
     return {
         "schema": "airlock.v1",
-        "payload_id": payload_id,
+        "payload_id": pid,
         "tenant_id": tenant_id,
         "guard_id": guard_id,
         "seq": 1042,
