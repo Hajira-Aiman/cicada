@@ -29,10 +29,12 @@ from contracts.models import (
     IngestReceipt,
 )
 from guard.config import config
-from guard.pseudonym import generate_pseudonym
+from guard.pseudonym import generate_pseudonym, PseudonymManager
 from guard.signer import create_auth_headers
 from guard.ledger import GuardLedger
 from guard.outbox import GuardOutbox
+from guard.raw_store import RawStore
+from guard.scrubber import Scrubber
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("airlock-guard")
@@ -44,11 +46,23 @@ class GuardThinSlice:
         cfg=config,
         ledger: Optional[GuardLedger] = None,
         outbox: Optional[GuardOutbox] = None,
+        raw_store: Optional[RawStore] = None,
+        scrubber: Optional[Scrubber] = None,
+        pseudonym_mgr: Optional[PseudonymManager] = None,
     ):
         self.config = cfg
         db_path = getattr(self.config, "GUARD_DB_PATH", "data/guard.db")
+        raw_db_path = getattr(self.config, "RAW_DB_PATH", "data/raw.db")
+        reveal_db_path = getattr(self.config, "REVEAL_DB_PATH", "data/reveal.db")
+
         self.ledger = ledger or GuardLedger(db_path=db_path)
         self.outbox = outbox or GuardOutbox(db_path=db_path, ledger=self.ledger)
+        self.raw_store = raw_store or RawStore(db_path=raw_db_path)
+        self.scrubber = scrubber or Scrubber()
+        self.pseudonym_mgr = pseudonym_mgr or PseudonymManager(
+            tenant_secret=self.config.TENANT_SECRET_KEY,
+            db_path=reveal_db_path,
+        )
 
         # Resume state from ledger: contiguous sequence with zero gaps
         last_seq, last_hash = self.ledger.get_last_seq_and_hash()
@@ -56,16 +70,16 @@ class GuardThinSlice:
         self.prev_hash = last_hash
 
         self.hostname = socket.gethostname()
-        self.host_pseudonym = generate_pseudonym("host", self.hostname, self.config.TENANT_SECRET_KEY)
+        self.host_pseudonym = self.pseudonym_mgr.get_or_create("host", self.hostname)
         self.pending_events: List[EventSample] = []
         self.pending_log_patterns: List[LogPatternSample] = []
 
-        # Service pseudonyms
+        # Service pseudonyms registered in local reveal table
         self.service_pseudonyms = {
-            "shop-api": generate_pseudonym("proc", "shop-api", self.config.TENANT_SECRET_KEY),
-            "login": generate_pseudonym("proc", "login", self.config.TENANT_SECRET_KEY),
-            "checkout": generate_pseudonym("proc", "checkout", self.config.TENANT_SECRET_KEY),
-            "db": generate_pseudonym("proc", "database", self.config.TENANT_SECRET_KEY),
+            "shop-api": self.pseudonym_mgr.get_or_create("proc", "shop-api"),
+            "login": self.pseudonym_mgr.get_or_create("proc", "login"),
+            "checkout": self.pseudonym_mgr.get_or_create("proc", "checkout"),
+            "db": self.pseudonym_mgr.get_or_create("proc", "database"),
         }
 
         # Network I/O counter baseline
@@ -95,6 +109,26 @@ class GuardThinSlice:
         )
         self.pending_events.append(event)
         logger.info(f"Queued event: {category} for source {src} (severity={severity})")
+
+    def process_log_line(self, raw_line: str, source: str = "shop-api") -> Tuple[str, int]:
+        """
+        Processes an incoming log line:
+        1. Stores raw line locally in raw.db (never sent over the wire).
+        2. Masks secrets (AWS keys, JWTs, bearer tokens, passwords, cards).
+        3. Returns (scrubbed_line, redactions_count).
+        """
+        # Store in local raw.db with 24h retention
+        self.raw_store.store_raw_log(text=raw_line, source=source)
+
+        # Mask secrets in pipeline
+        scrubbed_line, count = self.scrubber.scrub_text(raw_line)
+        if count > 0:
+            self.emit_change_event(
+                category="secret_redacted",
+                source=self.service_pseudonyms.get(source, self.host_pseudonym),
+                severity="medium",
+            )
+        return scrubbed_line, count
 
     def _get_net_rates(self) -> Tuple[float, float]:
         """Calculates network inbound and outbound throughput in kilobits per second (kbps)."""
@@ -255,6 +289,9 @@ class GuardThinSlice:
                 )
             )
 
+        # Plant canary every 30s into raw store (T5)
+        self.scrubber.maybe_plant_canary(raw_store=self.raw_store)
+
         # Guard process health
         proc = psutil.Process(os.getpid())
         guard_cpu = round(proc.cpu_percent(interval=None), 2)
@@ -267,8 +304,8 @@ class GuardThinSlice:
             guard_mem_mb=guard_mem,
             buffer_depth=current_buffer_depth,
             config_ok=True,
-            canaries_planted=0,
-            secrets_redacted=0,
+            canaries_planted=self.scrubber.canaries_planted,
+            secrets_redacted=self.scrubber.secrets_redacted,
         )
 
         payload_id = str(uuid.uuid4())
@@ -302,6 +339,13 @@ class GuardThinSlice:
 
         # Serialize body to exact JSON bytes
         body_json = payload.model_dump_json(by_alias=True)
+
+        # Pre-send policy gate: scan for canaries or unmasked secrets (T5, T10)
+        leak_detected, leak_reason = self.scrubber.contains_canary_or_secret(body_json)
+        if leak_detected:
+            logger.critical(f"POLICY GATE VIOLATION: {leak_reason}. Egress payload BLOCKED.")
+            raise ValueError(f"Pre-send policy violation: {leak_reason}")
+
         body_bytes = body_json.encode("utf-8")
 
         # Compute SHA-256 and chain

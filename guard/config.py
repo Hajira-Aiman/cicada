@@ -25,6 +25,8 @@ class GuardConfig:
     SHOP_API_PORT: int = int(os.getenv("SHOP_API_PORT", "7000"))
     SHOP_HEALTH_URL: str = os.getenv("SHOP_HEALTH_URL", f"http://127.0.0.1:{os.getenv('SHOP_API_PORT', '7000')}/health")
     GUARD_DB_PATH: str = os.getenv("GUARD_DB_PATH", "data/guard.db")
+    RAW_DB_PATH: str = os.getenv("RAW_DB_PATH", "data/raw.db")
+    REVEAL_DB_PATH: str = os.getenv("REVEAL_DB_PATH", "data/reveal.db")
     TIMEOUT_SECONDS: float = 5.0
 
 
