@@ -135,3 +135,31 @@ curl -fsSL https://192.168.137.1:8000/health
 nc -zv -w 2 192.168.137.1 5432
 # Expected: Connection timed out or Connection refused
 ```
+
+---
+
+## 6. Chaos Agent (T11) & Network Traffic Emulation (`tc netem`)
+
+The chaos agent runs on port 9100 (`uvicorn chaos.agent:app --host 0.0.0.0 --port 9100`) and triggers real host and network effects.
+
+### Network Latency & Packet Loss Injection via `tc netem`:
+To inject network latency and loss on the mobile hotspot or loopback interface:
+```bash
+# Inject 450ms delay and 3% packet loss
+sudo /usr/sbin/tc qdisc add dev lo root netem delay 450ms loss 3%
+
+# Revert / delete rule
+sudo /usr/sbin/tc qdisc del dev lo root
+```
+
+Triggering via Chaos Agent:
+```bash
+# CPU spike (burns 1 core at 100% for 15s)
+curl -X POST http://localhost:9100/scenarios/cpu_spike -H "Content-Type: application/json" -d '{"duration_s": 15}'
+
+# Network latency & loss
+curl -X POST http://localhost:9100/scenarios/latency -H "Content-Type: application/json" -d '{"duration_s": 20, "params": {"delay_ms": 450, "loss_pct": 3}}'
+
+# Region outage (pauses India region ingestion)
+curl -X POST http://localhost:9100/scenarios/region_outage -H "Content-Type: application/json" -d '{"duration_s": 30, "target": "in"}'
+```
