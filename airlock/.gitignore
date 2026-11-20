@@ -1,0 +1,6 @@
+reference/
+.venv/
+.env
+__pycache__/
+*.pem
+node_modules/
