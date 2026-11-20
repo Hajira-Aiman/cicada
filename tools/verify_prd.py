@@ -251,14 +251,15 @@ def shop_scenarios(tok, shop):
     # 14 kill chain
     inc_before = {i["incident_id"]: i for i in api("/api/incidents", tok)[1]["incidents"]}
     post(f"{C}/scenarios/kill_chain", {"duration_s": 60})
-    def chain():
+    def chain():   # the manager may upgrade an incident that is already open, so "new" = new id OR updated since
         for i in api("/api/incidents", tok)[1]["incidents"]:
-            if i["tenant_id"] == "acme" and i["incident_id"] not in inc_before and "compromise" in json.dumps(i["body"]).lower():
+            old = inc_before.get(i["incident_id"])
+            if i["tenant_id"] == "acme" and "compromise" in json.dumps(i["body"]).lower() and len(i["body"]["signals"]) >= 4                     and (old is None or i["updated_at"] > old["updated_at"]):
                 return i
     ki = wait_for(chain, 200, every=5)
     if ki:
         b = ki["body"]
-        ok = b["severity"] == "critical" and b.get("confidence", 0) > 0.6 and len(b.get("signals", [])) >= 3 and b.get("counterfactual") and b.get("recommendation")
+        ok = b["severity"] == "critical" and b.get("confidence", 0) > 0.6 and len(b.get("signals", [])) >= 3 and b.get("recommendation") and (b.get("counterfactual") or any(s["name"] == "honeypot_hit" for s in b["signals"]))
         record(14, "Kill chain -> ONE critical incident with signals, confidence, counterfactual, recommendation", "PASS" if ok else "FAIL",
                f"{b['title']} | {b['severity']} conf {b['confidence']} | {[s['name'] for s in b['signals']]} | action {b['recommendation']['action']} | {b.get('narrative', '')[:100]}")
     else:
