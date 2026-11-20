@@ -1,8 +1,25 @@
+import { api, apiFetch } from '../../services/apiClient';
+import { useLiveSync } from '../../services/liveSync';
+import { useUiStore } from '../../stores/uiStore';
 import React, { useState, useEffect } from 'react';
 import { useLocation, Link } from 'react-router-dom';
 import { useLiveStore } from '../../stores/liveStore';
 import { StatusBadge } from '../../components/StatusBadge';
 import { TimeText } from '../../components/TimeText';
+
+const PhoneLogin: React.FC = () => {
+  const setAuth = useUiStore((s) => s.setAuth);
+  const [u, setU] = useState('admin'); const [p, setP] = useState('admin123'); const [err, setErr] = useState('');
+  return (
+    <form className="hud-panel p-4 space-y-2" onSubmit={async (e) => { e.preventDefault(); try { const r = await api.login(u, p); setAuth(r.token, r.user_id, r.role as any, r.tenant_id || undefined); } catch (x: any) { setErr(x.message); } }}>
+      <span className="text-[10px] text-slate-400 uppercase block">Approver login</span>
+      <input value={u} onChange={(e) => setU(e.target.value)} className="w-full bg-[#080A10] border border-slate-700 p-2 text-white rounded" />
+      <input type="password" value={p} onChange={(e) => setP(e.target.value)} className="w-full bg-[#080A10] border border-slate-700 p-2 text-white rounded" />
+      {err && <div className="text-rose-400">{err}</div>}
+      <button className="w-full py-2 rounded bg-sky-600 text-white font-bold">LOG IN</button>
+    </form>
+  );
+};
 
 export const PhoneApp: React.FC = () => {
   const location = useLocation();
@@ -15,30 +32,54 @@ export const PhoneApp: React.FC = () => {
 
   const alerts = useLiveStore((s) => s.alerts);
   const incidents = useLiveStore((s) => s.incidents);
-  const actions = useLiveStore((s) => s.actions);
-  const updateActionState = useLiveStore((s) => s.updateActionState);
+  const counters = useLiveStore((s) => s.counters);
+  const token = useUiStore((s) => s.authToken);
+  useLiveSync();   // alerts, incidents and counters come from head office; needs the login below
+  const [intent, setIntent] = useState<any>(null);
+  const [note, setNote] = useState('');
 
   // Join state
   const [deviceId] = useState(() => `phone-${Math.random().toString(16).substring(2, 6)}`);
   const [latency, setLatency] = useState(42);
   const [connected, setConnected] = useState(true);
 
-  // Approve state
   const [approverName, setApproverName] = useState('Judge-01');
-  const [dryRunDone, setDryRunDone] = useState(false);
-  const [approved, setApproved] = useState(false);
+  const call = async (path: string, body?: object) => {
+    try {
+      const r = await apiFetch<any>(path, { method: 'POST', body: body ? JSON.stringify(body) : undefined });
+      setNote(r.simulation?.impact || `OK: ${r.status}`);
+    } catch (e: any) { setNote(e.message); }
+  };
+  useEffect(() => {
+    if (view !== 'approve' || !token) return;
+    const load = () => apiFetch<{ intents: any[] }>('/api/actions?limit=10').then((r) => setIntent(r.intents.find((i) => ['proposed', 'dry_run_done', 'approved'].includes(i.status)) || null)).catch(() => {});
+    load();
+    const id = setInterval(load, 2000);
+    return () => clearInterval(id);
+  }, [view, token]);
 
   // Raw alerts buzz simulation
   const [buzzCount, setBuzzCount] = useState(0);
 
+  // real heartbeat: measure the round trip to head office, report it, show the colour head office assigns (red above 150 ms)
+  const [color, setColor] = useState<'green' | 'red' | null>(null);
   useEffect(() => {
-    if (view === 'join') {
-      const interval = setInterval(() => {
-        setLatency(35 + Math.floor(Math.random() * 20));
-      }, 2000);
-      return () => clearInterval(interval);
-    }
-  }, [view]);
+    if (view !== 'join') return;
+    let live = true;
+    const beat = async () => {
+      try {
+        const t0 = performance.now();
+        await apiFetch('/health');
+        const rtt = Math.round(performance.now() - t0);
+        setLatency(rtt);
+        const r = await apiFetch<{ color: 'green' | 'red' }>('/api/phones/heartbeat', { method: 'POST', body: JSON.stringify({ phone_id: deviceId, latency_ms: rtt }) });
+        if (live) { setColor(r.color); setConnected(true); }
+      } catch { if (live) setConnected(false); }
+    };
+    beat();
+    const interval = setInterval(beat, 2000);
+    return () => { live = false; clearInterval(interval); };
+  }, [view, deviceId]);
 
   useEffect(() => {
     if (view === 'raw' && alerts.length > 0) {
@@ -105,7 +146,7 @@ export const PhoneApp: React.FC = () => {
             <div className="grid grid-cols-2 gap-2 text-left">
               <div className="p-3 rounded bg-[#121620] border border-white/5">
                 <span className="text-[10px] text-slate-500 block">DEVICE LATENCY</span>
-                <span className="text-sm font-bold text-emerald-400 font-tabular">{latency} ms</span>
+                <span className={`text-sm font-bold font-tabular ${color === 'red' ? 'text-rose-400' : 'text-emerald-400'}`}>{latency} ms</span>
               </div>
               <div className="p-3 rounded bg-[#121620] border border-white/5">
                 <span className="text-[10px] text-slate-500 block">REGION ASSIGNED</span>
@@ -115,75 +156,57 @@ export const PhoneApp: React.FC = () => {
           </div>
         )}
 
-        {/* VIEW: APPROVE */}
+        {/* VIEW: APPROVE (real intents from head office) */}
         {view === 'approve' && (
           <div className="space-y-4">
+            {!token && <PhoneLogin />}
+            {token && !intent && <div className="hud-panel p-4 text-slate-400">No remediation is waiting. Propose one from an incident card on the projector.</div>}
+            {token && intent && (
             <div className="hud-panel p-4 space-y-3 border border-cyan-500/30">
               <div className="flex items-center justify-between">
-                <span className="text-[10px] text-cyan-400 font-bold uppercase">1-TAP REMEDIATION</span>
+                <span className="text-[10px] text-cyan-400 font-bold uppercase">1-TAP REMEDIATION · {intent.status.toUpperCase()}</span>
                 <StatusBadge status="high" />
               </div>
-              <h3 className="text-sm font-bold text-white">Cryptomining Containment</h3>
+              <h3 className="text-sm font-bold text-white">{intent.tenant_id.toUpperCase()}</h3>
               <p className="text-xs text-slate-300">
-                Action: <strong className="text-sky-300">kill_process proc-1a2b3c4d</strong>
+                Action: <strong className="text-sky-300">{intent.action} {intent.target}</strong>
               </p>
               <div className="text-[10px] text-slate-400">
-                Risk: LOW · Reversible: YES · Rollback window: 120s
+                Risk: {String(intent.risk).toUpperCase()} · Rollback window: 120s
               </div>
 
               <div className="pt-2 border-t border-white/5 space-y-2">
                 <label className="text-[10px] text-slate-400 uppercase block">Approver Name</label>
-                <input
-                  type="text"
-                  value={approverName}
-                  onChange={(e) => setApproverName(e.target.value)}
-                  className="w-full bg-[#080A10] border border-slate-700 p-2 text-xs text-white rounded"
-                />
+                <input type="text" value={approverName} onChange={(e) => setApproverName(e.target.value)}
+                  className="w-full bg-[#080A10] border border-slate-700 p-2 text-xs text-white rounded" />
 
                 <div className="grid grid-cols-2 gap-2 pt-1">
-                  <button
-                    onClick={() => setDryRunDone(true)}
-                    className="py-2 rounded bg-slate-800 text-slate-200 font-bold border border-slate-600"
-                  >
-                    1. DRY RUN
-                  </button>
-                  <button
-                    onClick={() => {
-                      setApproved(true);
-                      updateActionState('act-001', 'approved', approverName);
-                    }}
-                    disabled={!dryRunDone || approved}
-                    className={`py-2 rounded font-bold ${
-                      approved
-                        ? 'bg-emerald-600/30 text-emerald-400 border border-emerald-500/40'
-                        : dryRunDone
-                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                        : 'bg-slate-800 text-slate-600 cursor-not-allowed'
-                    }`}
-                  >
-                    {approved ? '✓ APPROVED' : '2. APPROVE'}
+                  <button onClick={() => call(`/api/actions/${intent.intent_id}/dry-run`)}
+                    className="py-2 rounded bg-slate-800 text-slate-200 font-bold border border-slate-600">1. DRY RUN</button>
+                  <button onClick={() => call(`/api/actions/${intent.intent_id}/approve`, { approved_by: approverName })}
+                    disabled={intent.status !== 'dry_run_done'}
+                    className={`py-2 rounded font-bold ${intent.status === 'approved' ? 'bg-emerald-600/30 text-emerald-400 border border-emerald-500/40'
+                      : intent.status === 'dry_run_done' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-600 cursor-not-allowed'}`}>
+                    {intent.status === 'approved' ? '✓ APPROVED' : '2. APPROVE'}
                   </button>
                 </div>
-
-                {dryRunDone && (
-                  <div className="p-2 rounded bg-black/60 text-[10px] text-cyan-300">
-                    ✓ Dry run simulated: 0 casualties, CPU drops to 22%.
-                  </div>
-                )}
+                {note && <div className="p-2 rounded bg-black/60 text-[10px] text-cyan-300">{note}</div>}
               </div>
             </div>
+            )}
           </div>
         )}
 
         {/* VIEW: RAW (Noisy stream comparison) */}
         {view === 'raw' && (
           <div className="space-y-3">
+            {!token && <PhoneLogin />}
             <div className="p-3 rounded bg-rose-950/20 border border-rose-500/30 text-center">
               <span className="text-[10px] text-rose-400 font-bold uppercase block">
                 RAW ALERT STREAM (NOISE DEMO)
               </span>
               <span className="text-xl font-bold text-rose-300 mt-1 block">
-                {alerts.length + 40} RAW ALERTS
+                {counters.raw_alerts} RAW ALERTS
               </span>
               <span className="text-[10px] text-slate-400">Vibrates on every unsuppressed threshold hit</span>
             </div>
@@ -205,6 +228,7 @@ export const PhoneApp: React.FC = () => {
         {/* VIEW: SMART (Filtered incidents only) */}
         {view === 'smart' && (
           <div className="space-y-3">
+            {!token && <PhoneLogin />}
             <div className="p-3 rounded bg-emerald-950/20 border border-emerald-500/30 text-center">
               <span className="text-[10px] text-emerald-400 font-bold uppercase block">
                 AIOPS CORRELATED STREAM (CLEAN DEMO)
@@ -212,7 +236,7 @@ export const PhoneApp: React.FC = () => {
               <span className="text-xl font-bold text-emerald-300 mt-1 block">
                 {incidents.length} CORRELATED INCIDENTS
               </span>
-              <span className="text-[10px] text-emerald-400 font-bold">94% NOISE CUT ACTIVE</span>
+              <span className="text-[10px] text-emerald-400 font-bold">{counters.raw_alerts ? Math.round((1 - counters.incidents / counters.raw_alerts) * 100) : 0}% NOISE CUT</span>
             </div>
 
             <div className="space-y-3">
@@ -222,7 +246,7 @@ export const PhoneApp: React.FC = () => {
                     <span className="text-white font-bold text-xs">{inc.title}</span>
                     <StatusBadge status={inc.severity} />
                   </div>
-                  <p className="text-[11px] text-slate-300">{inc.narrative || inc.counterfactual}</p>
+                  <p className="text-[11px] text-slate-300">{inc.narrative || inc.counterfactual || ''}</p>
                   <div className="text-[10px] text-slate-500">
                     Confidence: <strong className="text-cyan-400">{Math.round(inc.confidence * 100)}%</strong>
                   </div>

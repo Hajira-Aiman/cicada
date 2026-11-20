@@ -16,16 +16,7 @@ export const ChaosApp: React.FC = () => {
   const [activeScenarioId, setActiveScenarioId] = useState<string | null>(null);
   const [leakText, setLeakText] = useState('');
   const [leakResult, setLeakResult] = useState<string | null>(null);
-  const [scenarioLogs, setScenarioLogs] = useState<LogItem[]>([
-    {
-      id: 'l-1',
-      timestamp: new Date(Date.now() - 360000).toISOString(),
-      scenario: 'kill_chain',
-      target: 'guard-acme-01',
-      result: 'Full kill chain injected. Correlated into inc-0042 at Head Office.',
-      success: true,
-    },
-  ]);
+  const [scenarioLogs, setScenarioLogs] = useState<LogItem[]>([]);
 
   const handleTrigger = async (sc: ChaosScenario) => {
     setActiveScenarioId(sc.id);
@@ -54,7 +45,7 @@ export const ChaosApp: React.FC = () => {
       scenario: 'Try-To-Leak Injection',
       target: targetGuard,
       result: res.message,
-      success: true,
+      success: res.success,
     };
     setScenarioLogs((prev) => [logItem, ...prev]);
     setLeakText('');

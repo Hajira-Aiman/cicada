@@ -1532,6 +1532,21 @@ def create_action_intent(
     }
 
 
+def list_action_intents(limit: int = 50) -> List[Dict[str, Any]]:
+    """Recent action intents, newest first (for the Actions screen and the approver phone)."""
+    rows = execute_query("airlock_core", f"SELECT * FROM action_intents ORDER BY created_at DESC LIMIT {int(limit)};")
+    out = []
+    for r in rows:
+        r = dict(r)
+        if isinstance(r.get("details"), str):
+            try:
+                r["details"] = json.loads(r["details"])
+            except Exception:
+                pass
+        out.append(r)
+    return out
+
+
 def get_action_intent(intent_id: str) -> Optional[Dict[str, Any]]:
     """Retrieves an action intent by ID from airlock_core."""
     query = "SELECT * FROM action_intents WHERE intent_id = %s;" if is_postgres_available() else "SELECT * FROM action_intents WHERE intent_id = ?;"

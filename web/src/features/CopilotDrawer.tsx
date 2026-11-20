@@ -59,7 +59,8 @@ export const CopilotDrawer: React.FC = () => {
     }
 
     try {
-      const res = await api.aiChat(question);
+      const tenant = activeTenant === 'ALL' ? 'acme' : activeTenant;   // engineers must name a tenant; customers are fixed by login
+      const res = await api.aiChat(question, tenant);
       setMessages((prev) => [
         ...prev,
         {
@@ -75,8 +76,8 @@ export const CopilotDrawer: React.FC = () => {
         {
           id: `a-${Date.now()}`,
           sender: 'assistant',
-          text: `Correlated telemetry: SSH login burst at 04:10 preceded 96% CPU spike on host-7f3a1234. Incident inc-0042 rule matched.`,
-          evidence_ids: ['ev-1', 'ev-2'],
+          text: `I could not get an answer: ${err.message}`,
+          evidence_ids: [],
         },
       ]);
     } finally {

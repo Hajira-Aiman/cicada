@@ -14,9 +14,11 @@ import { ActionsTab } from './pages/ActionsTab';
 import { HistoryTab } from './pages/HistoryTab';
 import { SettingsTab } from './pages/SettingsTab';
 import { useLiveSocket } from '../../services/liveSocket';
+import { useLiveSync } from '../../services/liveSync';
 
 export const HqApp: React.FC = () => {
-  useLiveSocket(); // Single live WebSocket connection for the application
+  useLiveSocket(); // websocket pushes
+  useLiveSync();   // REST pull of the real backend state every 2 s
 
   return (
     <div className="flex h-screen flex-col bg-[#0B0E14] text-[#D1D5DB] overflow-hidden font-sans">

@@ -1,0 +1,108 @@
+// Pulls the real backend state over REST every 2 s into the live store (the websocket is a bonus, not the source of truth).
+import { useEffect } from 'react';
+import { api, apiFetch } from './apiClient';
+import { useLiveStore } from '../stores/liveStore';
+import { useUiStore } from '../stores/uiStore';
+import { Alert, GuardInfo, HealthState, Incident, MetricDataPoint } from '../types';
+
+const RANK: Record<string, number> = { excellent: 0, good: 1, fair: 2, poor: 3, offline: 4 };
+const cap = (s: string): HealthState => (s ? s[0].toUpperCase() + s.slice(1).toLowerCase() : 'Good') as HealthState;
+const CHARTED = new Set(['cpu_pct', 'mem_pct', 'latency_ms', 'net_out_kbps', 'net_in_kbps', 'packet_loss_pct', 'disk_pct']);
+
+let lastMetricTime: string | null = null;
+const seenPayloads = new Set<string>();
+export const resetSync = () => { lastMetricTime = null; seenPayloads.clear(); };
+
+export async function syncOnce() {
+  const store = useLiveStore.getState();
+  const [tenants, health, recon, incs, alerts, metrics, payloads, acts] = await Promise.all([
+    api.getTenants(), api.getHealth(), api.getReconciliation(), api.getIncidents(), api.getAlerts(),
+    apiFetch<{ metrics: any[] }>(`/api/metrics${lastMetricTime ? `?since=${encodeURIComponent(lastMetricTime)}` : ''}`),
+    api.getPayloads(), apiFetch<{ intents: any[] }>('/api/actions?limit=20').catch(() => ({ intents: [] as any[] })),
+  ]);
+  const region: Record<string, 'in' | 'eu'> = {};
+  tenants.tenants.forEach((t) => (region[t.tenant_id] = t.assigned_region as 'in' | 'eu'));
+
+  // ---- metrics (append only new points, keyed tenant:name; baseline band from /api/baselines)
+  const fresh = metrics.metrics.filter((m) => CHARTED.has(m.name)).sort((a, b) => +new Date(a.event_time) - +new Date(b.event_time));
+  if (metrics.metrics.length) lastMetricTime = metrics.metrics.reduce((mx, m) => (m.event_time > mx ? m.event_time : mx), lastMetricTime || '');
+  const baselines: Record<string, Record<string, { mean: number; std: number }>> = {};
+  await Promise.all(Object.keys(region).filter((t) => region[t]).map(async (t) => {
+    try {
+      const rows: any[] = await apiFetch(`/api/baselines/${t}`);
+      baselines[t] = {};
+      rows.forEach((r) => { baselines[t][`${r.source}:${r.metric}`] = { mean: r.mean, std: r.std }; });
+    } catch { /* band simply stays empty */ }
+  }));
+  const next = { ...store.metrics };
+  for (const m of fresh) {
+    const key = `${m.tenant_id}:${m.name}`;
+    const b = baselines[m.tenant_id]?.[`${m.source}:${m.name}`];
+    const pt: MetricDataPoint = { id: m.id, name: m.name, source: m.source, tenant_id: m.tenant_id, avg: m.avg, max: m.max,
+      event_time: m.event_time, baseline: b?.mean, spread: b ? 2 * b.std : undefined, is_anomaly: b ? Math.abs(m.avg - b.mean) > 3 * b.std : false };
+    next[key] = [...(next[key] || []).filter((p) => p.id !== m.id), pt].slice(-300);
+  }
+
+  // ---- guards: one per reconciliation row, health = worst state of that tenant's sources
+  const guards: Record<string, GuardInfo> = {};
+  for (const r of recon.reconciliation) {
+    const rows = health.health.filter((h) => h.tenant_id === r.tenant_id);
+    const worst = rows.reduce((w, h) => Math.max(w, RANK[h.state] ?? 0), 0);
+    const bad = rows.filter((h) => (RANK[h.state] ?? 0) === worst);
+    const cpu = (next[`${r.tenant_id}:cpu_pct`] || []).slice(-1)[0];
+    guards[r.guard_id] = {
+      guard_id: r.guard_id, tenant_id: r.tenant_id, region: region[r.tenant_id] || 'in',
+      source: (rows.find((h) => h.source.startsWith('host-')) || rows[0])?.source || '—',
+      state: rows.length ? cap(Object.keys(RANK).find((k) => RANK[k] === worst)!) : 'Good',
+      reasons: [...new Set(bad.flatMap((h) => (worst > 1 ? h.reasons : [])))],
+      since: bad[0]?.since || r.last_seen, last_seen: r.last_seen,
+      guard_version: '—', guard_cpu_pct: cpu ? Math.round(cpu.avg) : 0, guard_mem_mb: 0, buffer_depth: Math.max(0, r.sent_count - r.received_count),
+      config_ok: true, canaries_planted: 0, secrets_redacted: 0,
+      flaps_prevented: rows.reduce((n, h) => n + (h.flaps_prevented || 0), 0), policy_hash: '—',
+    };
+  }
+
+  // ---- incidents + alerts (contract shape: body holds the fields)
+  const incidents: Incident[] = incs.incidents.map((i) => ({ ...i.body, incident_id: i.incident_id, tenant_id: i.tenant_id, status: i.status || 'open' }));
+  const alertList: Alert[] = alerts.alerts.map((a) => ({ alert_id: a.alert_id, tenant_id: a.tenant_id, source: a.source, title: a.title,
+    severity: a.severity, body: a.body, created_at: a.created_at, status: a.status || 'open' }));
+
+  // ---- receipts from payloads, latency sample from the newest metric
+  const receipts = payloads.payloads.slice(0, 100).map((p) => ({ guard_id: p.guard_id, payload_id: p.payload_id, seq: p.seq, status: 'stored' as const,
+    sha256: p.prev_hash, event_time: p.sent_at, received_at: p.received_at }));
+  const newest = payloads.payloads[0];
+  const fresh_ = newest && !seenPayloads.has(newest.payload_id);
+  if (newest) seenPayloads.add(newest.payload_id);
+
+  // ---- counters (summed over tenants shown)
+  const counts = await Promise.all(Object.keys(region).filter((t) => region[t] && t !== 'guests').map((t) => api.getCounters(t).catch(() => null)));
+  const sum = (k: string) => counts.reduce((n, c) => n + (c?.[k] || 0), 0);
+
+  useLiveStore.setState((s) => ({
+    guards, metrics: next, incidents, alerts: alertList, receipts,
+    actions: acts.intents.map((a) => ({ action_id: a.intent_id, tenant_id: a.tenant_id, action: a.action, target: a.target,
+      state: ({ dry_run_done: 'dry_run', done: 'executed' } as any)[a.status] || a.status, result: a.details?.why || a.details?.impact,
+      requested_by: 'aiops', approved_by: a.approved_by || undefined, at: a.created_at, rollback_window_s: 120 })),
+    reconciliation: Object.fromEntries(recon.reconciliation.map((r) => [r.guard_id, r])),
+    counters: { ...s.counters, raw_alerts: sum('raw_alerts'), incidents: sum('incidents'), flaps_prevented: sum('flaps_prevented') },
+    latencySamples: fresh_ && newest ? [{ event_time: newest.sent_at, render_time: new Date().toISOString(),
+      latency_ms: Math.max(0, Date.now() - new Date(newest.sent_at).getTime()) }, ...s.latencySamples].slice(0, 50) : s.latencySamples,
+  }));
+}
+
+export function useLiveSync() {
+  const token = useUiStore((s) => s.authToken);
+  const mode = useLiveStore((s) => s.mode);
+  useEffect(() => {
+    if (!token || mode !== 'LIVE') return;
+    resetSync();
+    useLiveStore.getState().clearForLive();
+    let stop = false;
+    const tick = async () => {
+      try { await syncOnce(); useLiveStore.getState().setConnected(true); } catch { useLiveStore.getState().setConnected(false); }
+    };
+    tick();
+    const id = setInterval(() => !stop && tick(), 2000);
+    return () => { stop = true; clearInterval(id); };
+  }, [token, mode]);
+}

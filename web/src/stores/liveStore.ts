@@ -33,6 +33,7 @@ interface LiveState {
   addIncident: (incident: Incident) => void;
   updateActionState: (actionId: string, newState: ActionRecord['state'], approvedBy?: string) => void;
   resetToSimulated: (sampleData: any) => void;
+  clearForLive: () => void;
 }
 
 const INITIAL_GUARDS: Record<string, GuardInfo> = {
@@ -98,67 +99,22 @@ const INITIAL_GUARDS: Record<string, GuardInfo> = {
 export const useLiveStore = create<LiveState>((set, get) => ({
   connected: false,
   mode: 'LIVE',
-  guards: INITIAL_GUARDS,
+  guards: {},
   metrics: {},
   incidents: [],
   alerts: [],
   receipts: [],
-  checkpoints: {
-    'guard-acme-01': { guard_id: 'guard-acme-01', up_to_seq: 1420, root: 'sha256:7f3a...9c1e', match: true },
-    'guard-globex-01': { guard_id: 'guard-globex-01', up_to_seq: 980, root: 'sha256:3a9f...8b2c', match: true },
-    'guard-contoso-01': { guard_id: 'guard-contoso-01', up_to_seq: 620, root: 'sha256:1a2b...4d5e', match: true },
-  },
-  actions: [
-    {
-      action_id: 'act-001',
-      tenant_id: 'acme',
-      action: 'kill_process',
-      target: 'proc-1a2b3c4d',
-      state: 'dry_run',
-      result: 'Process proc-1a2b3c4d isolated; CPU projected drop from 96% to 22%',
-      requested_by: 'aiops-agent',
-      approved_by: undefined,
-      at: new Date(Date.now() - 120000).toISOString(),
-      rollback_window_s: 120,
-      remaining_s: 94,
-    },
-  ],
-  reconciliation: {
-    'guard-acme-01': {
-      guard_id: 'guard-acme-01',
-      tenant_id: 'acme',
-      sent_count: 1420,
-      received_count: 1420,
-      duplicate_count: 3,
-      max_seq: 1420,
-      last_hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-      gaps: [],
-      last_seen: new Date().toISOString(),
-    },
-    'guard-globex-01': {
-      guard_id: 'guard-globex-01',
-      tenant_id: 'globex',
-      sent_count: 980,
-      received_count: 980,
-      duplicate_count: 1,
-      max_seq: 980,
-      last_hash: '4f5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f',
-      gaps: [],
-      last_seen: new Date().toISOString(),
-    },
-  },
-  counters: {
-    raw_alerts: 47,
-    incidents: 3,
-    flaps_prevented: 12,
-    canaries_planted: 1240,
-    leaks_detected: 0,
-    duplicates_blocked: 4,
-  },
+  checkpoints: {},
+  actions: [],
+  reconciliation: {},
+  counters: { raw_alerts: 0, incidents: 0, flaps_prevented: 0, canaries_planted: 0, leaks_detected: 0, duplicates_blocked: 0 },
   latencySamples: [],
 
+  // live mode starts empty: every tile, chart and counter then comes from the backend
+  clearForLive: () => set({ guards: {}, metrics: {}, incidents: [], alerts: [], receipts: [], checkpoints: {}, reconciliation: {},
+    counters: { raw_alerts: 0, incidents: 0, flaps_prevented: 0, canaries_planted: 0, leaks_detected: 0, duplicates_blocked: 0 }, latencySamples: [] }),
   setConnected: (connected) => set({ connected }),
-  setMode: (mode) => set({ mode }),
+  setMode: (mode) => set(mode === 'SIMULATED' ? { mode, guards: INITIAL_GUARDS } : { mode }),
 
   apply: (event: any) => {
     if (!event) return;

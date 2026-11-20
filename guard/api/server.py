@@ -61,6 +61,12 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         guard_cpu = round(proc.cpu_percent(interval=None), 2)
         guard_mem = round(proc.memory_info().rss / (1024 * 1024), 2)
         last_seq, _ = _guard.ledger.get_last_seq_and_hash()
+        health = {}
+        try:   # the collector runs as another process: its real counters are in the newest payload it sent
+            rows = _guard.ledger.get_recent_rows(limit=1)
+            health = (json.loads(rows[0]["body"]).get("health") or {}) if rows else {}
+        except Exception:
+            pass
         return {
             "guard_id": _guard.config.GUARD_ID,
             "tenant_id": _guard.config.TENANT_ID,
@@ -69,10 +75,10 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
             "buffer_depth": _guard.outbox.get_buffer_depth(),
             "retention_countdown_seconds": _guard.raw_store.get_retention_countdown(),
             "policy_version": _guard.config.POLICY_VERSION,
-            "canaries_planted": _guard.scrubber.canaries_planted,
-            "secrets_redacted": _guard.scrubber.secrets_redacted,
-            "guard_cpu_pct": guard_cpu,
-            "guard_mem_mb": guard_mem,
+            "canaries_planted": health.get("canaries_planted", _guard.scrubber.canaries_planted),
+            "secrets_redacted": health.get("secrets_redacted", _guard.scrubber.secrets_redacted),
+            "guard_cpu_pct": health.get("guard_cpu_pct", guard_cpu),
+            "guard_mem_mb": health.get("guard_mem_mb", guard_mem),
             "last_seq": last_seq,
         }
 
@@ -132,6 +138,33 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
+    hq = os.getenv("HQ_URL", "http://localhost:8000")
+
+    def pull_reveals():
+        """Head office never reaches into the shop: the guard asks for pending reveal requests for its own tenant."""
+        import time
+        import httpx
+        while True:
+            try:
+                rows = httpx.get(f"{hq}/reveal-requests", params={"status": "pending"}, timeout=3).json().get("reveal_requests", [])
+                known = {r["id"] for r in _guard.pseudonym_mgr.list_reveal_requests()}
+                for r in rows:
+                    if r.get("tenant_id") == _guard.config.TENANT_ID and r["request_id"] not in known:
+                        _guard.pseudonym_mgr.create_reveal_request(pseudonym=r["pseudonym"], reason=r["reason"], req_id=r["request_id"])
+            except Exception:
+                pass
+            time.sleep(3)
+
+    def push_decision(req_id, status, reason):
+        """Only the decision goes back to head office, never the revealed value."""
+        try:
+            import httpx
+            httpx.post(f"{hq}/reveal-requests/{req_id}/decision", json={"status": status, "decision_reason": reason}, timeout=3)
+        except Exception:
+            pass
+
+    api.state.pull_reveals = pull_reveals   # started only when run as a program (see __main__), never on import or in tests
+
     @api.get("/api/reveal-requests")
     def list_reveal_requests(status: Optional[str] = None):
         """Returns pending and decided reveal requests."""
@@ -157,6 +190,7 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         res = _guard.pseudonym_mgr.decide_reveal_request(req_id=req_id, approved=True, reason=reason)
         if not res:
             raise HTTPException(status_code=404, detail=f"Reveal request '{req_id}' not found")
+        push_decision(req_id, "approved", reason)
         return res
 
     @api.post("/api/reveal-requests/{req_id}/reject")
@@ -166,6 +200,7 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         res = _guard.pseudonym_mgr.decide_reveal_request(req_id=req_id, approved=False, reason=reason)
         if not res:
             raise HTTPException(status_code=404, detail=f"Reveal request '{req_id}' not found")
+        push_decision(req_id, "rejected", reason)
         return res
 
     @api.get("/api/reveal/{pseudonym}")
@@ -209,5 +244,7 @@ app = create_guard_api_app()
 
 if __name__ == "__main__":
     import uvicorn
+    import threading
+    threading.Thread(target=app.state.pull_reveals, daemon=True).start()
     port = int(os.getenv("GUARD_PORT", "9000"))
     uvicorn.run(app, host="127.0.0.1", port=port)

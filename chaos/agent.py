@@ -47,6 +47,10 @@ def _run_cpu_burner(duration_s: float):
         _ = 3.1415926535 * 2.7182818284 * 1.4142135623
 
 
+# the attack must hit the shop's own login: the guard reads that log, HQ never sees raw logins
+SHOP_LOGIN_URL = os.getenv("SHOP_LOGIN_URL", "http://localhost:7000/auth/login")
+
+
 def _run_brute_force(duration_s: float, target_url: str):
     """Sends rapid burst of invalid authentication attempts."""
     import httpx
@@ -89,7 +93,13 @@ def _run_kill_chain(duration_s: float):
     time.sleep(step_duration)
 
     # Stage 2: Login burst
-    _run_brute_force(step_duration, "http://localhost:8000/api/login")
+    _run_brute_force(step_duration, SHOP_LOGIN_URL)
+    # a success right after the failures = login_after_failures (the kill chain's second step)
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            client.post(SHOP_LOGIN_URL, json={"username": "admin", "password": "securepass2026"})
+    except Exception:
+        pass
 
     # Stage 3: High CPU spike
     _run_cpu_burner(step_duration)
@@ -159,7 +169,7 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
     if name == "cpu_spike":
         threading.Thread(target=_run_cpu_burner, args=(duration_s,), daemon=True).start()
     elif name in ("brute_force", "login_burst"):
-        target_url = p.get("url", "http://localhost:8000/api/login")
+        target_url = p.get("url", SHOP_LOGIN_URL)
         threading.Thread(target=_run_brute_force, args=(duration_s, target_url), daemon=True).start()
     elif name == "backup_job":
         threading.Thread(target=_run_backup_job, args=(duration_s,), daemon=True).start()

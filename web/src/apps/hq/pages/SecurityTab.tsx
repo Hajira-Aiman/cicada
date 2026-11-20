@@ -2,56 +2,22 @@ import React from 'react';
 import { useLiveStore } from '@/stores/liveStore';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TimeText } from '@/components/TimeText';
+import { apiFetch } from '@/services/apiClient';
+const SECURITY = new Set(['auth_failure_burst', 'login_after_failures', 'odd_hour_login', 'honeypot_hit', 'new_process', 'secret_redacted']);
 
 export const SecurityTab: React.FC = () => {
   const alerts = useLiveStore((s) => s.alerts);
 
-  const securityEvents = [
-    {
-      id: 'sec-001',
-      category: 'auth_failure_burst',
-      source: 'host-7f3a1234',
-      actor: 'src-9c2e0011',
-      count: 50,
-      window_s: 2,
-      risk: 'HIGH',
-      at: new Date(Date.now() - 300000).toISOString(),
-      details: 'SSH brute force pattern: 50 failed attempts in 2.0s',
-    },
-    {
-      id: 'sec-002',
-      category: 'login_after_failures',
-      source: 'host-7f3a1234',
-      actor: 'src-9c2e0011',
-      count: 1,
-      window_s: 60,
-      risk: 'CRITICAL',
-      at: new Date(Date.now() - 240000).toISOString(),
-      details: 'Sudden success following 50 consecutive failed logins',
-    },
-    {
-      id: 'sec-003',
-      category: 'honeypot_hit',
-      source: 'host-1a2b3c4d',
-      actor: 'src-4f5e6a7b',
-      count: 1,
-      window_s: 1,
-      risk: 'CRITICAL',
-      at: new Date(Date.now() - 720000).toISOString(),
-      details: 'Trap port 2222 accessed; attacker probed decoy endpoint',
-    },
-    {
-      id: 'sec-004',
-      category: 'odd_hour_login',
-      source: 'host-9c2e0011',
-      actor: 'user-7f3a1234',
-      count: 1,
-      window_s: 1,
-      risk: 'MEDIUM',
-      at: new Date(Date.now() - 1440000).toISOString(),
-      details: 'Admin shell accessed at 03:14 shop-local time (Asia/Kolkata)',
-    },
-  ];
+  const [securityEvents, setEvents] = React.useState<any[]>([]);
+  React.useEffect(() => {
+    const load = () => apiFetch<{ events: any[] }>('/api/events?limit=300').then((r) => setEvents(r.events.filter((e) => SECURITY.has(e.category)).slice(0, 24).map((e) => ({
+      id: String(e.id), category: e.category, source: e.source, actor: e.actor || '—', count: e.count, window_s: e.window_s,
+      risk: e.severity === 'critical' ? 'CRITICAL' : e.severity === 'high' ? 'HIGH' : 'MEDIUM', at: e.event_time,
+      details: `${e.count} × ${e.category.replace(/_/g, ' ')} in ${e.window_s}s window` })))).catch(() => {});
+    load();
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <div className="p-4 space-y-4 max-w-[1920px] mx-auto font-mono text-xs">

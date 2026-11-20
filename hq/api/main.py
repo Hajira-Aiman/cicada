@@ -33,9 +33,11 @@ from hq.db import (
     get_action_intent,
     get_tenant_assigned_region,
     get_damage_map,
+    list_action_intents,
     get_tenant_baselines,
     get_tenant_counters,
     init_all_databases,
+    is_postgres_available,
     is_region_paused,
     list_pending_action_intents,
     list_reveal_requests,
@@ -85,7 +87,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
     return payload
 
 
-def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = "*", order_by: str = "") -> List[Dict[str, Any]]:
+def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = "*", order_by: str = "", where: str = "", params: tuple = (), limit: int = 0) -> List[Dict[str, Any]]:
     """
     Executes tenant-isolated queries respecting data residency and database-enforced RLS.
     Customers query only their assigned region database with their tenant RLS parameter.
@@ -93,7 +95,7 @@ def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = 
     """
     role = user.get("role")
     user_tenant = user.get("tenant_id")
-    order_clause = f" ORDER BY {order_by}" if order_by else ""
+    order_clause = (f" WHERE {where}" if where else "") + (f" ORDER BY {order_by}" if order_by else "") + (f" LIMIT {int(limit)}" if limit else "")
 
     if role == "customer":
         if not user_tenant:
@@ -102,13 +104,13 @@ def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = 
         region = get_tenant_assigned_region(user_tenant) or "in"
         db_name = "airlock_in" if region == "in" else "airlock_eu"
         query = f"SELECT {select_cols} FROM {table_name}{order_clause};"
-        return execute_query(db_name, query, tenant_id=user_tenant)
+        return execute_query(db_name, query, params, tenant_id=user_tenant)
     else:
         # Engineer: query both regions and combine
         res = []
         for db in ("airlock_in", "airlock_eu"):
             query = f"SELECT {select_cols} FROM {table_name}{order_clause};"
-            rows = execute_query(db, query, tenant_id="all")
+            rows = execute_query(db, query, params, tenant_id="all")
             res.extend(rows)
         return res
 
@@ -210,15 +212,27 @@ def list_tenants(user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
 
 
 @app.get("/api/metrics")
-def get_metrics(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = query_tenant_data(user, "metrics", select_cols="id, payload_id, tenant_id, source, name, avg, max, event_time", order_by="event_time DESC")
+def get_metrics(since: Optional[str] = None, limit: int = 5000, user: Dict[str, Any] = Depends(get_current_user)):
+    """Newest first; `since` (ISO time) returns only newer rows, and at most `limit` rows per region come back."""
+    where, params = "", ()
+    if since:
+        where, params = ("event_time > %s" if is_postgres_available() else "event_time > ?"), (since,)
+    rows = query_tenant_data(user, "metrics", select_cols="id, payload_id, tenant_id, source, name, avg, max, event_time",
+                             order_by="event_time DESC", where=where, params=params, limit=limit)
     return {"metrics": rows}
 
 
 @app.get("/api/events")
-def get_events(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = query_tenant_data(user, "events", select_cols="id, payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time", order_by="event_time DESC")
+def get_events(limit: int = 200, user: Dict[str, Any] = Depends(get_current_user)):
+    rows = query_tenant_data(user, "events", select_cols="id, payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time", order_by="event_time DESC", limit=limit)
     return {"events": rows}
+
+
+@app.get("/api/health/history")
+def get_health_history(limit: int = 100, user: Dict[str, Any] = Depends(get_current_user)):
+    """Health transitions written by the AIOps worker, newest first."""
+    rows = query_tenant_data(user, "health_history", select_cols="id, tenant_id, source, state, old_state, reasons, at", order_by="at DESC", limit=limit)
+    return {"history": sorted(rows, key=lambda r: str(r["at"]), reverse=True)[:limit]}
 
 
 @app.get("/api/payloads")
@@ -513,6 +527,15 @@ def approve_action(
         "approved_by": req.approved_by.strip(),
         "intent": updated,
     }
+
+
+@app.get("/api/actions")
+def list_actions(limit: int = 50, user: Dict[str, Any] = Depends(get_current_user)):
+    """All recent intents (customers see only their own tenant's)."""
+    rows = list_action_intents(limit)
+    if user.get("role") == "customer":
+        rows = [r for r in rows if r.get("tenant_id") == user.get("tenant_id")]
+    return {"intents": [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in r.items()} for r in rows]}
 
 
 @app.get("/api/actions/pending")

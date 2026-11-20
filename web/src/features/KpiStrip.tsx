@@ -15,11 +15,11 @@ export const KpiStrip: React.FC = () => {
   const latencies = latencySamples.map((s) => s.latency_ms);
   const p95Latency = latencies.length > 0
     ? (latencies.sort((a, b) => a - b)[Math.floor(latencies.length * 0.95)] / 1000).toFixed(1)
-    : '2.8';
+    : '—';
 
   const noiseCutPct = counters.raw_alerts > 0
     ? Math.round(((counters.raw_alerts - counters.incidents) / counters.raw_alerts) * 100)
-    : 94;
+    : 0;
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">

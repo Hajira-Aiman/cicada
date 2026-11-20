@@ -5,10 +5,11 @@ import { TimeText } from '../../components/TimeText';
 
 export const ShopApp: React.FC = () => {
   const [status, setStatus] = useState<LocalGuardStatus | null>(null);
+  const [guardDown, setGuardDown] = useState(false);
   const [logs, setLogs] = useState<LocalLogEntry[]>([]);
   const [egressList, setEgressList] = useState<EgressPayloadEntry[]>([]);
   const [revealRequests, setRevealRequests] = useState<RevealRequestItem[]>([]);
-  const [countdown, setCountdown] = useState(86140);
+  const [countdown, setCountdown] = useState(0);
   const [selectedEgress, setSelectedEgress] = useState<EgressPayloadEntry | null>(null);
   const [decidingId, setDecidingId] = useState<string | null>(null);
 
@@ -21,9 +22,10 @@ export const ShopApp: React.FC = () => {
         shopApi.getRevealRequests(),
       ]);
       setStatus(st);
+      setGuardDown(!st);
       setLogs(lg);
       setEgressList(eg);
-      if (eg.length > 0) setSelectedEgress(eg[0]);
+      setSelectedEgress((cur) => (cur ? eg.find((e) => e.seq === cur.seq) || cur : eg[0] || null));
       setRevealRequests(rev);
     };
 
@@ -33,9 +35,10 @@ export const ShopApp: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      setCountdown((prev) => (prev > 0 ? prev - 1 : 86400));
-    }, 1000);
+    if (status) setCountdown(status.retention_countdown_s);   // resync from the guard on every poll
+  }, [status]);
+  useEffect(() => {
+    const timer = setInterval(() => setCountdown((prev) => (prev > 0 ? prev - 1 : 0)), 1000);
     return () => clearInterval(timer);
   }, []);
 
@@ -57,6 +60,7 @@ export const ShopApp: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-[#080A10] text-[#D1D5DB] font-sans flex flex-col">
+      {guardDown && <div className="bg-rose-900/60 text-rose-200 text-xs font-mono px-4 py-2">Cannot reach the guard API on port 9000. Start the guard on this machine; nothing is shown until it answers.</div>}
       {/* Full-width Lime Local Accent Banner */}
       <div className="w-full bg-[#A3E635] text-black px-4 py-2 flex items-center justify-between font-mono font-bold text-xs shadow-lg">
         <div className="flex items-center space-x-2">
@@ -75,7 +79,7 @@ export const ShopApp: React.FC = () => {
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           <div className="hud-panel hud-panel--local p-3">
             <span className="text-[10px] text-lime-400 font-bold uppercase block">GUARD STATUS</span>
-            <span className="text-lg font-black text-white uppercase mt-0.5 block">{status?.status || 'ACTIVE'}</span>
+            <span className="text-lg font-black text-white uppercase mt-0.5 block">{guardDown ? 'GUARD OFFLINE' : status?.status || '…'}</span>
           </div>
           <div className="hud-panel hud-panel--local p-3">
             <span className="text-[10px] text-lime-400 font-bold uppercase block">BUFFER DEPTH</span>
@@ -87,11 +91,11 @@ export const ShopApp: React.FC = () => {
           </div>
           <div className="hud-panel hud-panel--local p-3">
             <span className="text-[10px] text-lime-400 font-bold uppercase block">CANARIES ACTIVE</span>
-            <span className="text-lg font-black text-purple-300 mt-0.5 block">{status?.canaries_planted ?? 420}</span>
+            <span className="text-lg font-black text-purple-300 mt-0.5 block">{status?.canaries_planted ?? '—'}</span>
           </div>
           <div className="hud-panel hud-panel--local p-3">
             <span className="text-[10px] text-lime-400 font-bold uppercase block">SECRETS REDACTED (LOCAL)</span>
-            <span className="text-lg font-black text-emerald-400 mt-0.5 block">{status?.secrets_redacted ?? 3}</span>
+            <span className="text-lg font-black text-emerald-400 mt-0.5 block">{status?.secrets_redacted ?? '—'}</span>
           </div>
         </div>
 
@@ -151,18 +155,10 @@ export const ShopApp: React.FC = () => {
                   </div>
                   {/* Highlight secrets in crimson */}
                   <div className="text-slate-200">
-                    {log.has_secret ? (
-                      <span>
-                        {log.message.split(log.secret_type ? ' ' : 'token=')[0]}
-                        <mark className="bg-rose-600/30 text-rose-300 font-bold px-1 rounded mx-1">
-                          {log.secret_type === 'JWT Token' ? 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.s3cr3t_jwt_t0k3n_2026' :
-                           log.secret_type === 'Database Credential' ? 'postgresql://postgres:SuperSecretP@ssw0rd!@10.0.4.12:5432/shop_db' :
-                           '[CANARY_KEY_LIVE_TEST]'}
-                        </mark>
-                      </span>
-                    ) : (
-                      log.message
-                    )}
+                    {(log.parts || [{ text: log.message, secret: false }]).map((p, i) =>
+                      p.secret
+                        ? <mark key={i} className="bg-rose-600/30 text-rose-300 font-bold px-1 rounded mx-1">{p.text}</mark>
+                        : <span key={i}>{p.text}</span>)}
                   </div>
                   {log.redacted_preview && (
                     <div className="mt-1 text-[10px] text-slate-500 italic">

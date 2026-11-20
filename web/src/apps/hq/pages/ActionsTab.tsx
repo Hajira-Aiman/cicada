@@ -7,9 +7,7 @@ export const ActionsTab: React.FC = () => {
   const actions: ActionRecord[] = useLiveStore((s) => s.actions);
   const updateActionState = useLiveStore((s) => s.updateActionState);
 
-  const [rollbackTimers, setRollbackTimers] = useState<Record<string, number>>({
-    'act-001': 94,
-  });
+  const [rollbackTimers, setRollbackTimers] = useState<Record<string, number>>({});
 
   useEffect(() => {
     const interval = setInterval(() => {

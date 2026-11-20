@@ -6,8 +6,8 @@ export const LatencyMeter: React.FC = () => {
 
   const values = latencySamples.map((s) => s.latency_ms);
   const sorted = [...values].sort((a, b) => a - b);
-  const p50 = sorted.length ? Math.round(sorted[Math.floor(sorted.length * 0.5)]) : 140;
-  const p95 = sorted.length ? Math.round(sorted[Math.floor(sorted.length * 0.95)]) : 280;
+  const p50 = sorted.length ? Math.round(sorted[Math.floor(sorted.length * 0.5)]) : '—';
+  const p95 = sorted.length ? Math.round(sorted[Math.floor(sorted.length * 0.95)]) : '—';
 
   return (
     <div className="hud-panel p-3 flex items-center justify-between font-mono text-xs">

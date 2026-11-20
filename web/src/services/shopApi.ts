@@ -1,4 +1,4 @@
-// Shop Screen Local Data Service (connects to Guard on port 9000, fallback to mocks)
+// Shop Screen Local Data Service: talks to the shop's own Guard API on port 9000 only. No mock data: if the guard is down, the screen says so.
 const GUARD_API_URL = import.meta.env.VITE_GUARD_API_URL || 'http://localhost:9000';
 
 export interface LocalGuardStatus {
@@ -9,6 +9,11 @@ export interface LocalGuardStatus {
   secrets_redacted: number;
   checkpoint_seq: number;
   checkpoint_root: string;
+  guard_id?: string;
+  tenant_id?: string;
+  guard_cpu_pct?: number;
+  guard_mem_mb?: number;
+  policy_version?: string;
 }
 
 export interface LocalLogEntry {
@@ -19,6 +24,7 @@ export interface LocalLogEntry {
   has_secret: boolean;
   secret_type?: string;
   redacted_preview?: string;
+  parts?: { text: string; secret: boolean }[];   // raw line split around the secrets (shown only on this local screen)
 }
 
 export interface EgressPayloadEntry {
@@ -38,148 +44,70 @@ export interface RevealRequestItem {
   requested_by: string;
   status: 'pending' | 'approved' | 'rejected';
   requested_at: string;
+  revealed_value?: string;
 }
 
-const MOCK_LOCAL_STATUS: LocalGuardStatus = {
-  status: 'active',
-  buffer_depth: 0,
-  retention_countdown_s: 86140, // ~23h 55m
-  canaries_planted: 420,
-  secrets_redacted: 3,
-  checkpoint_seq: 1420,
-  checkpoint_root: 'sha256:7f3a9c1e4d5b2a0f8e1c6b3a7d9e0f2a',
+const SECRETS: [string, RegExp][] = [
+  ['Cloud Key', /AKIA[0-9A-Z]{8,}/g], ['Password', /password=\S+/gi], ['Token', /(?:token|secret|access_key|api_key)=\S+/gi],
+  ['JWT Token', /eyJ[\w-]+\.[\w-]+\.[\w-]+/g], ['Card Number', /(?:\d{4}[ -]?){3}\d{4}/g],
+  ['Database Credential', /\w+:\/\/[^\s:@]+:[^\s@]+@\S+/g],
+];
+
+async function get<T>(path: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${GUARD_API_URL}${path}`, { signal: AbortSignal.timeout(2500) });
+    return res.ok ? ((await res.json()) as T) : null;
+  } catch { return null; }
+}
+const split = (text: string, spans: string[]) => {
+  let parts = [{ text, secret: false }];
+  for (const x of new Set(spans)) {
+    parts = parts.flatMap((p) => p.secret ? [p] : p.text.split(x).flatMap((t, i) => (i ? [{ text: x, secret: true }, { text: t, secret: false }] : [{ text: t, secret: false }])));
+  }
+  return parts.filter((p) => p.text);
 };
-
-const MOCK_LOGS: LocalLogEntry[] = [
-  {
-    id: 'l-101',
-    timestamp: '2026-11-21T04:12:00Z',
-    level: 'INFO',
-    message: 'User authentication succeeded: user=admin token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.s3cr3t_jwt_t0k3n_2026',
-    has_secret: true,
-    secret_type: 'JWT Token',
-    redacted_preview: 'User authentication succeeded: user=admin token=***REDACTED***',
-  },
-  {
-    id: 'l-102',
-    timestamp: '2026-11-21T04:12:02Z',
-    level: 'INFO',
-    message: 'PostgreSQL connection initialized: postgresql://postgres:SuperSecretP@ssw0rd!@10.0.4.12:5432/shop_db',
-    has_secret: true,
-    secret_type: 'Database Credential',
-    redacted_preview: 'PostgreSQL connection initialized: postgresql://postgres:***REDACTED***@10.0.4.12:5432/shop_db',
-  },
-  {
-    id: 'l-103',
-    timestamp: '2026-11-21T04:12:04Z',
-    level: 'INFO',
-    message: 'Telemetry window 1042 scrubbed and pseudonymized. 2 secrets stripped.',
-    has_secret: false,
-  },
-  {
-    id: 'l-104',
-    timestamp: '2026-11-21T04:12:06Z',
-    level: 'WARN',
-    message: 'Tripwire trigger: canary credential used in shop-api curl test. Leak blocked at local gate.',
-    has_secret: true,
-    secret_type: 'Canary Key',
-  },
-];
-
-const MOCK_EGRESS: EgressPayloadEntry[] = [
-  {
-    payload_id: '0193f2c1-7b5e-7c3a-9f10-4be2a1d0c9e1',
-    seq: 1042,
-    sent_at: '2026-11-21T04:12:04Z',
-    sha256: 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    receipt_sha256: 'sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    match: true,
-    raw_payload: {
-      schema: 'airlock.v1',
-      payload_id: '0193f2c1-7b5e-7c3a-9f10-4be2a1d0c9e1',
-      tenant_id: 'acme',
-      guard_id: 'guard-acme-01',
-      seq: 1042,
-      window: { start: '2026-11-21T04:12:04Z', end: '2026-11-21T04:12:06Z', source_tz: 'Asia/Kolkata' },
-      metrics: [{ name: 'cpu_pct', source: 'host-7f3a', avg: 34.2, max: 51.0 }],
-      events: [{ category: 'auth_failure_burst', severity: 'high', source: 'host-7f3a', actor: 'src-9c2e', count: 50, window_s: 60 }],
-      health: { guard_version: '0.3.1', buffer_depth: 0, canaries_planted: 420, secrets_redacted: 3 },
-    },
-  },
-  {
-    payload_id: '0193f2c0-6a4d-7b29-8e0f-3ad190c8b8d0',
-    seq: 1041,
-    sent_at: '2026-11-21T04:12:02Z',
-    sha256: 'sha256:9c1e4d5b2a0f8e1c6b3a7d9e0f2a4c6e8b0d2f4a6c8e0a2c4e6f8a0b2d4f6e8a',
-    receipt_sha256: 'sha256:9c1e4d5b2a0f8e1c6b3a7d9e0f2a4c6e8b0d2f4a6c8e0a2c4e6f8a0b2d4f6e8a',
-    match: true,
-    raw_payload: {
-      schema: 'airlock.v1',
-      payload_id: '0193f2c0-6a4d-7b29-8e0f-3ad190c8b8d0',
-      tenant_id: 'acme',
-      guard_id: 'guard-acme-01',
-      seq: 1041,
-      window: { start: '2026-11-21T04:12:02Z', end: '2026-11-21T04:12:04Z', source_tz: 'Asia/Kolkata' },
-      metrics: [{ name: 'cpu_pct', source: 'host-7f3a', avg: 22.4, max: 28.0 }],
-      events: [],
-      health: { guard_version: '0.3.1', buffer_depth: 0, canaries_planted: 420, secrets_redacted: 2 },
-    },
-  },
-];
-
-const MOCK_REVEAL_REQUESTS: RevealRequestItem[] = [
-  {
-    request_id: 'rev-001',
-    pseudonym: 'user-7f3a1234',
-    reason: 'Investigating unauthorized sudo escalation during cryptomining incident inc-0042',
-    requested_by: 'security-analyst-1',
-    status: 'pending',
-    requested_at: '2026-11-21T04:15:00Z',
-  },
-];
+const iso = (t: number | string) => (typeof t === 'number' ? new Date(t * 1000).toISOString() : t);
 
 export const shopApi = {
-  getStatus: async (): Promise<LocalGuardStatus> => {
-    try {
-      const res = await fetch(`${GUARD_API_URL}/api/status`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return await res.json();
-    } catch {}
-    return MOCK_LOCAL_STATUS;
+  getStatus: async (): Promise<LocalGuardStatus | null> => {
+    const [st, cp] = await Promise.all([get<any>('/api/status'), get<any>('/api/checkpoint')]);
+    if (!st) return null;
+    return { status: st.status, buffer_depth: st.buffer_depth, retention_countdown_s: Math.round(st.retention_countdown_seconds),
+      canaries_planted: st.canaries_planted, secrets_redacted: st.secrets_redacted, checkpoint_seq: cp?.up_to_seq ?? st.last_seq,
+      checkpoint_root: cp?.root ?? '', guard_id: st.guard_id, tenant_id: st.tenant_id, guard_cpu_pct: st.guard_cpu_pct,
+      guard_mem_mb: st.guard_mem_mb, policy_version: st.policy_version };
   },
 
   getRawLogs: async (): Promise<LocalLogEntry[]> => {
-    try {
-      const res = await fetch(`${GUARD_API_URL}/api/raw-logs`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return await res.json();
-    } catch {}
-    return MOCK_LOGS;
+    const r = await get<{ logs: any[] }>('/api/raw-logs?minutes=60');
+    return (r?.logs || []).map((l) => {
+      const spans = SECRETS.flatMap(([, re]) => l.raw_text.match(re) || []);
+      const type = SECRETS.find(([, re]) => (l.raw_text.match(re) || []).length)?.[0];
+      let preview = l.raw_text;
+      spans.forEach((x: string) => (preview = preview.split(x).join('[REDACTED]')));
+      return { id: String(l.id), timestamp: iso(l.timestamp), level: /fail|error|denied/i.test(l.raw_text) ? 'WARN' : 'INFO',
+        message: l.raw_text, has_secret: spans.length > 0 || l.source === 'canary-tripwire', secret_type: type,
+        redacted_preview: spans.length ? preview : undefined, parts: split(l.raw_text, spans) } as LocalLogEntry;
+    });
   },
 
   getEgressLedger: async (): Promise<EgressPayloadEntry[]> => {
-    try {
-      const res = await fetch(`${GUARD_API_URL}/api/egress`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return await res.json();
-    } catch {}
-    return MOCK_EGRESS;
+    const r = await get<{ payloads: any[] }>('/api/egress');
+    return (r?.payloads || []).map((p) => ({ payload_id: p.payload_id, seq: p.seq, sent_at: p.body?.sent_at || p.receipt_at || '',
+      sha256: p.sha256, receipt_sha256: p.status === 'stored' ? p.sha256 : '', match: p.status === 'stored', raw_payload: p.body }));
   },
 
   getRevealRequests: async (): Promise<RevealRequestItem[]> => {
-    try {
-      const res = await fetch(`${GUARD_API_URL}/api/reveal-requests`, { signal: AbortSignal.timeout(2000) });
-      if (res.ok) return await res.json();
-    } catch {}
-    return MOCK_REVEAL_REQUESTS;
+    const r = await get<{ requests: any[] }>('/api/reveal-requests');
+    return (r?.requests || []).map((q) => ({ request_id: q.id, pseudonym: q.pseudonym, reason: q.reason, requested_by: 'head-office',
+      status: q.status, requested_at: iso(q.requested_at), revealed_value: q.revealed_value }));
   },
 
   decideReveal: async (requestId: string, status: 'approved' | 'rejected', reason?: string): Promise<boolean> => {
     try {
-      const res = await fetch(`${GUARD_API_URL}/api/reveal-requests/${requestId}/decision`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status, decision_reason: reason }),
-      });
-      if (res.ok) return true;
-    } catch {}
-    return true; // Mock success
+      const res = await fetch(`${GUARD_API_URL}/api/reveal-requests/${requestId}/${status === 'approved' ? 'approve' : 'reject'}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ decision_reason: reason }) });
+      return res.ok;
+    } catch { return false; }
   },
 };

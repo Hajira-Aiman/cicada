@@ -1,6 +1,7 @@
 import { useUiStore } from '../stores/uiStore';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// same host as the page, so a phone or a second laptop on the hotspot reaches head office too
+const API_BASE_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number;
@@ -105,19 +106,22 @@ export const api = {
     }),
 
   // AI Copilot
-  aiChat: (question: string) =>
+  aiChat: (question: string, tenantId?: string) =>
     apiFetch<{ answer: string; evidence_ids: string[] }>('/api/ai/chat', {
       method: 'POST',
-      body: JSON.stringify({ question }),
+      timeoutMs: 40000,
+      body: JSON.stringify({ question, tenant_id: tenantId }),
     }),
 
   // Counters
   getCounters: (tenantId: string) => apiFetch<any>(`/api/counters/${tenantId}`),
 
   // Feedback
-  postFeedback: (alertId: string) =>
+  postFeedback: (alertId: string, tenantId: string, userId: string) =>
     apiFetch<any>('/api/feedback', {
       method: 'POST',
-      body: JSON.stringify({ alert_id: alertId }),
+      body: JSON.stringify({ alert_id: alertId, tenant_id: tenantId, user_id: userId }),
     }),
+  getDamageMap: (tenantId: string) =>
+    apiFetch<{ nodes: { id: string; state: 'ok' | 'impacted' | 'affected' }[]; edges: { from: string; to: string }[] }>(`/api/damage-map/${tenantId}`),
 };

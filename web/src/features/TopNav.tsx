@@ -19,7 +19,7 @@ const TABS = [
 
 export const TopNav: React.FC = () => {
   const [utcClock, setUtcClock] = useState('');
-  const [loginModalOpen, setLoginModalOpen] = useState(false);
+  const [loginModalOpen, setLoginModalOpen] = useState(!useUiStore.getState().authToken);  // live data needs a login
   const [loginUsername, setLoginUsername] = useState('admin');
   const [loginPassword, setLoginPassword] = useState('admin123');
   const [loginError, setLoginError] = useState('');

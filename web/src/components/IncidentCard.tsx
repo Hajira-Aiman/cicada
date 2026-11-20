@@ -3,7 +3,8 @@ import { Incident } from '../types';
 import { StatusBadge } from './StatusBadge';
 import { TimeText } from './TimeText';
 import { useLiveStore } from '../stores/liveStore';
-import { api } from '../services/apiClient';
+import { api, apiFetch } from '../services/apiClient';
+import { useUiStore } from '../stores/uiStore';
 
 interface IncidentCardProps {
   incident: Incident;
@@ -19,29 +20,54 @@ export const IncidentCard: React.FC<IncidentCardProps> = ({ incident, onSelectEv
   const [revealStatus, setRevealStatus] = useState<string | null>(null);
   const updateActionState = useLiveStore((s) => s.updateActionState);
 
-  const handleDryRun = () => {
-    setDryRunOutput(
-      `DRY RUN [PRE-FLIGHT SIMULATION]:\n` +
-      `Target: ${incident.recommendation?.target || 'proc-1a2b3c4d'}\n` +
-      `Action: ${incident.recommendation?.action || 'kill_process'}\n` +
-      `Safety Check: Reversible=${incident.recommendation?.reversible ? 'YES' : 'NO'}, Risk=${incident.recommendation?.risk.toUpperCase()}\n` +
-      `Projected Impact: Outbound net spikes drop to 40 kbps. Latency normalizes in 4s.\n` +
-      `Rollback hook armed: 120s timer.`
-    );
+  const [intentId, setIntentId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const userId = useUiStore((s) => s.currentUserId) || 'operator';
+
+  // real flow: propose -> dry run -> human approval (guard then pulls the signed intent)
+  const handleDryRun = async () => {
+    const rec = incident.recommendation;
+    if (!rec) return;
+    setActionError(null);
+    try {
+      let id = intentId;
+      if (!id) {
+        const p = await apiFetch<any>('/api/actions/propose', { method: 'POST', body: JSON.stringify({
+          action: rec.action, target: rec.target || incident.affected[0], why: rec.why, risk: rec.risk, reversible: rec.reversible,
+          rollback: rec.rollback, incident_id: incident.incident_id, tenant_id: incident.tenant_id }) });
+        id = p.intent_id; setIntentId(id);
+      }
+      const d = await apiFetch<any>(`/api/actions/${id}/dry-run`, { method: 'POST' });
+      setDryRunOutput(`DRY RUN [${id}]:
+Target: ${d.simulation.target}
+Action: ${d.simulation.action}
+` +
+        `Would succeed: ${d.simulation.would_succeed ? 'YES' : 'NO'}
+${d.simulation.impact}
+Rollback: ${rec.rollback || 'n/a'}`);
+      useLiveStore.setState((st) => ({ actions: [{ action_id: id!, tenant_id: incident.tenant_id, action: rec.action, target: rec.target,
+        state: 'dry_run' as const, result: d.simulation.impact, requested_by: 'aiops', at: new Date().toISOString(), rollback_window_s: 120 },
+        ...st.actions.filter((x) => x.action_id !== id)] }));
+    } catch (e: any) { setActionError(e.message); }
   };
 
   const handleApprove = async () => {
-    setIsApproving(true);
+    if (!intentId) { setActionError('Run the dry run first.'); return; }
+    setIsApproving(true); setActionError(null);
     try {
-      // simulate approval dispatch
-      setTimeout(() => {
-        setActionDispatched(true);
-        setIsApproving(false);
-        updateActionState('act-001', 'approved', 'anisa-operator');
-      }, 600);
-    } catch {
-      setIsApproving(false);
-    }
+      await apiFetch(`/api/actions/${intentId}/approve`, { method: 'POST', body: JSON.stringify({ approved_by: userId }) });
+      setActionDispatched(true);
+      updateActionState(intentId, 'approved', userId);
+    } catch (e: any) { setActionError(e.message); }
+    setIsApproving(false);
+  };
+
+  const thumbsDown = async () => {
+    const mine = useLiveStore.getState().alerts.filter((a) => a.tenant_id === incident.tenant_id && a.status === 'open');
+    try {
+      await Promise.all(mine.map((a) => api.postFeedback(a.alert_id, a.tenant_id, userId)));
+      setActionError(mine.length ? `Thanks. ${mine.length} alert(s) will need a stronger signal for 30 min.` : 'No open alert to give feedback on.');
+    } catch (e: any) { setActionError(e.message); }
   };
 
   const submitRevealRequest = async (pseudonym: string) => {
@@ -192,6 +218,13 @@ export const IncidentCard: React.FC<IncidentCardProps> = ({ incident, onSelectEv
                 REQUEST REVEAL
               </button>
               <button
+                onClick={thumbsDown}
+                title="Not useful: raise this signal's alert level for 30 min"
+                className="px-2.5 py-1 text-xs font-mono font-bold rounded bg-slate-800 text-slate-200 border border-slate-600 hover:bg-slate-700"
+              >
+                👎
+              </button>
+              <button
                 onClick={handleDryRun}
                 className="px-3 py-1 text-xs font-mono font-bold rounded bg-slate-800 text-slate-200 border border-slate-600 hover:bg-slate-700"
               >
@@ -221,6 +254,7 @@ export const IncidentCard: React.FC<IncidentCardProps> = ({ incident, onSelectEv
             <span>Rollback: <span className="text-slate-400">{incident.recommendation.rollback}</span></span>
           </div>
 
+          {actionError && <div className="text-[11px] font-mono text-amber-300">{actionError}</div>}
           {dryRunOutput && (
             <pre className="p-2.5 rounded bg-black/60 border border-slate-700 text-[11px] font-mono text-cyan-300 whitespace-pre-wrap">
               {dryRunOutput}

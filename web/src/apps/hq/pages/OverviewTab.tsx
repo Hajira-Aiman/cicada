@@ -8,7 +8,14 @@ import { IncidentCard } from '@/components/IncidentCard';
 import { StatusBadge } from '@/components/StatusBadge';
 import { TimeText } from '@/components/TimeText';
 import { Fallback2D } from '@/three/Fallback2D';
+import { DamageMap } from '@/components/DamageMap';
 import { GuardInfo, Incident } from '@/types';
+
+const bandOf = (d: { baseline?: number; spread?: number }[], dflt: [number, number]): [number, number] => {
+  const p = d[d.length - 1];
+  const r1 = (x: number) => Math.round(x * 10) / 10;
+  return p?.baseline !== undefined && p.spread !== undefined ? [Math.max(0, r1(p.baseline - p.spread)), r1(p.baseline + p.spread)] : dflt;
+};
 
 export const OverviewTab: React.FC = () => {
   const guards = useLiveStore((s) => s.guards);
@@ -95,28 +102,28 @@ export const OverviewTab: React.FC = () => {
           title="CPU USAGE"
           unit="%"
           data={cpuData}
-          normalRange={[15, 35]}
+          normalRange={bandOf(cpuData, [15, 35])}
           color="#38BDF8"
         />
         <MetricChart
           title="LATENCY"
           unit="ms"
           data={latencyData}
-          normalRange={[30, 60]}
+          normalRange={bandOf(latencyData, [30, 60])}
           color="#10B981"
         />
         <MetricChart
           title="NET OUTBOUND"
           unit="kbps"
           data={netData}
-          normalRange={[20, 80]}
+          normalRange={bandOf(netData, [20, 80])}
           color="#A855F7"
         />
         <MetricChart
           title="MEMORY USAGE"
           unit="%"
           data={memData}
-          normalRange={[45, 60]}
+          normalRange={bandOf(memData, [45, 60])}
           color="#06B6D4"
         />
       </div>
@@ -157,6 +164,7 @@ export const OverviewTab: React.FC = () => {
               ZERO CLEAR-TEXT EXPORT
             </span>
           </div>
+          <DamageMap tenant={activeTenant === 'ALL' ? 'acme' : activeTenant} />
           <div className="h-[420px]">
             <Fallback2D height="100%" />
           </div>

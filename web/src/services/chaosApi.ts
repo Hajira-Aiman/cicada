@@ -1,6 +1,7 @@
 // Chaos Console Service (connects to Chaos agent on port 9100 / HQ API)
 import { api } from './apiClient';
 
+const SHOP_API_URL = import.meta.env.VITE_SHOP_API_URL || 'http://localhost:7000';
 const CHAOS_API_URL = import.meta.env.VITE_CHAOS_API_URL || 'http://localhost:9100';
 
 export interface ChaosScenario {
@@ -39,40 +40,29 @@ export const chaosApi = {
       const res = await fetch(`${CHAOS_API_URL}/scenarios/${scenarioId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_guard: targetGuard, intensity: 100, duration_s: 20 }),
-        signal: AbortSignal.timeout(3000),
+        body: JSON.stringify({ duration_s: 20 }),
+        signal: AbortSignal.timeout(5000),
       });
-
-      if (res.ok) {
-        const data = await res.json();
-        return { success: true, message: data.message || `Scenario ${scenarioId} dispatched to ${targetGuard}` };
-      }
-    } catch {}
-
-    // Fallback notification for demo simulation
-    return {
-      success: true,
-      message: `Scenario ${scenarioId} dispatched to ${targetGuard} (local simulator triggered)`,
-    };
+      if (res.ok) return { success: true, message: `Scenario ${scenarioId} running for 20 s on ${targetGuard}` };
+      return { success: false, message: `Chaos agent refused ${scenarioId}: HTTP ${res.status}` };
+    } catch {
+      return { success: false, message: `Chaos agent not reachable on ${CHAOS_API_URL}. Start it with: python -m chaos.agent` };
+    }
   },
 
-  injectLog: async (rawText: string, targetGuard: string): Promise<{ success: boolean; message: string }> => {
+  injectLog: async (rawText: string, _targetGuard: string): Promise<{ success: boolean; message: string }> => {
     try {
-      const res = await fetch(`${CHAOS_API_URL}/chaos/inject-log`, {
+      const res = await fetch(`${SHOP_API_URL}/chaos/inject-log`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: rawText, target: targetGuard }),
+        body: JSON.stringify({ text: rawText }),
         signal: AbortSignal.timeout(3000),
       });
-      if (res.ok) {
-        return { success: true, message: 'Injected into shop log stream. Scrubber active.' };
-      }
-    } catch {}
-
-    return {
-      success: true,
-      message: 'Secret injected locally. Scrubber redacted credentials; tripwire counter incremented.',
-    };
+      if (res.ok) return { success: true, message: 'Written to the shop log. The guard scrubs it before anything leaves the shop.' };
+      return { success: false, message: `Shop API refused the log line: HTTP ${res.status}` };
+    } catch {
+      return { success: false, message: `Shop API not reachable on ${SHOP_API_URL}.` };
+    }
   },
 
   reset: async (): Promise<boolean> => {

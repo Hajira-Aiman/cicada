@@ -1,50 +1,19 @@
 import React from 'react';
 import { TimeText } from '@/components/TimeText';
 import { StatusBadge } from '@/components/StatusBadge';
+import { apiFetch } from '@/services/apiClient';
+const cap = (x: string) => x.charAt(0).toUpperCase() + x.slice(1);
 
 export const HistoryTab: React.FC = () => {
-  const transitions = [
-    {
-      id: 'h-1',
-      tenant_id: 'acme',
-      source: 'host-7f3a1234',
-      old_state: 'Good',
-      new_state: 'Poor',
-      reasons: ['Elevated CPU > 85% for 3 windows', 'Cryptominer signature matched'],
-      at: '2026-11-21T04:12:06Z',
-      source_tz: 'Asia/Kolkata',
-    },
-    {
-      id: 'h-2',
-      tenant_id: 'globex',
-      source: 'host-9c2e0011',
-      old_state: 'Excellent',
-      new_state: 'Good',
-      reasons: ['Slight net_out variance in window 980'],
-      at: '2026-11-21T04:11:40Z',
-      source_tz: 'Europe/Berlin',
-    },
-    {
-      id: 'h-3',
-      tenant_id: 'contoso',
-      source: 'host-1a2b3c4d',
-      old_state: 'Poor',
-      new_state: 'Fair',
-      reasons: ['CPU dropping following restart'],
-      at: '2026-11-21T04:09:12Z',
-      source_tz: 'Asia/Kolkata',
-    },
-    {
-      id: 'h-4',
-      tenant_id: 'acme',
-      source: 'host-7f3a1234',
-      old_state: 'Excellent',
-      new_state: 'Good',
-      reasons: ['SSH failed login burst detected'],
-      at: '2026-11-21T04:05:00Z',
-      source_tz: 'Asia/Kolkata',
-    },
-  ];
+  const [transitions, setTransitions] = React.useState<any[]>([]);
+  React.useEffect(() => {
+    const load = () => apiFetch<{ history: any[] }>('/api/health/history?limit=100').then((r) => setTransitions(r.history.map((h) => ({
+      id: String(h.id), tenant_id: h.tenant_id, source: h.source, old_state: cap(h.old_state || 'good'), new_state: cap(h.state),
+      reasons: h.reasons || [], at: h.at, source_tz: undefined })))).catch(() => {});
+    load();
+    const id = setInterval(load, 3000);
+    return () => clearInterval(id);
+  }, []);
 
   return (
     <div className="p-4 space-y-4 max-w-[1920px] mx-auto font-mono text-xs">
