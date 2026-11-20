@@ -41,8 +41,13 @@ def test_auth_burst_50_wrong_passwords_produces_one_burst_event(tmp_path):
         )
         assert len(events) == 0  # Bursts are evaluated per window
 
-    # 2. Evaluate burst: must produce EXACTLY ONE auth_failure_burst with count=50
-    burst_events = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=now + 5.0)
+    # Mid-burst check (at 30 failures, quiet_time < 0.5s): must NOT prematurely emit at 30
+    mid_burst = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=now + 3.0)
+    assert len(mid_burst) == 0
+
+    # 2. Evaluate burst at completion (quiet_time >= 0.5s after last failure at now + 4.9s):
+    # must produce EXACTLY ONE auth_failure_burst with count=50
+    burst_events = detector.evaluate_bursts(service_pseudonym=service_pseudo, now=now + 5.5)
     assert len(burst_events) == 1
     ev = burst_events[0]
     assert ev.category == "auth_failure_burst"

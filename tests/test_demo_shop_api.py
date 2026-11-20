@@ -13,6 +13,7 @@ Verification for T16 Demo Shop App:
 """
 
 import os
+import time
 import pytest
 from starlette.testclient import TestClient
 
@@ -90,6 +91,9 @@ def test_shop_api_logs_flow_through_guard_pipeline(tmp_path):
         # 1. Inject 50 wrong password attempts
         for i in range(50):
             client.post("/auth/login", json={"username": f"user_{i}", "password": f"bad_pwd_{i}"})
+
+        # Wait briefly for burst stream to conclude
+        time.sleep(0.55)
 
         # 2. Inject sensitive text with an AWS access key and credit card number
         leak_text = "Backup failure: AKIAIOSFODNN7EXAMPLE and card 5555 4444 3333 2222 logged"
