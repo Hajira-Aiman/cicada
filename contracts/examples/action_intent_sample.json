@@ -1,0 +1,9 @@
+{
+  "intent_id": "act-0193f2c1",
+  "tenant_id": "globex",
+  "action": "block_ip",
+  "target": "src-9c2e0011",
+  "timestamp": "2026-11-21T04:15:00Z",
+  "signature": "hmac-sha256-intent-signature-example",
+  "rollback_window_s": 900
+}

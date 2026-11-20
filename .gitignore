@@ -5,7 +5,6 @@ Thumbs.db
 .vscode/
 *.suo
 *.user
-
 # Logs & temp
 *.log
 npm-debug.log*
@@ -13,7 +12,6 @@ yarn-debug.log*
 yarn-error.log*
 temp/
 tmp/
-
 # Python
 __pycache__/
 *.py[cod]
@@ -23,9 +21,18 @@ __pycache__/
 htmlcov/
 venv/
 .env
-
 # Airlock Local Data & SQLite
 data/*.db
 data/*.db-journal
 shop-api/logs/*.log
 reference/
+.venv/
+*.egg-info/
+dist/
+build/
+# Local databases & state
+*.db
+*.sqlite3
+# Reference directory (cloned reference repos are read-only)
+*.pem
+node_modules/

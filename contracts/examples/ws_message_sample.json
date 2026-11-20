@@ -1,0 +1,16 @@
+{
+  "event_type": "metrics_batch",
+  "tenant_id": "globex",
+  "timestamp": "2026-11-21T04:12:08Z",
+  "payload": {
+    "source": "host-7f3a1234",
+    "metrics": [
+      {
+        "name": "cpu_pct",
+        "avg": 34.2,
+        "max": 51.0
+      }
+    ],
+    "health_state": "Excellent"
+  }
+}
