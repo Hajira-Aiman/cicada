@@ -1,3 +1,4 @@
+import { ShopAssistant } from '../../features/ShopAssistant';
 import React, { useState, useEffect } from 'react';
 import { shopApi, LocalGuardStatus, LocalLogEntry, EgressPayloadEntry, RevealRequestItem } from '../../services/shopApi';
 import { EgressProofPanel } from '../../components/EgressProofPanel';
@@ -222,6 +223,7 @@ export const ShopApp: React.FC = () => {
           </div>
         </div>
       </div>
+      <ShopAssistant />
     </div>
   );
 };

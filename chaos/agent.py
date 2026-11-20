@@ -16,6 +16,7 @@ Provides endpoints for:
 
 import os
 import re
+import sys
 import time
 import uuid
 import threading
@@ -74,7 +75,8 @@ def _run_exfil(duration_s: float, rate_kbps: int = 4000):
 
 
 # the attack must hit the shop's own login: the guard reads that log, HQ never sees raw logins
-SHOP_LOGIN_URL = os.getenv("SHOP_LOGIN_URL", "http://localhost:7000/auth/login")
+SHOP_API_URL = os.getenv("SHOP_API_URL", "http://localhost:7000")
+SHOP_LOGIN_URL = os.getenv("SHOP_LOGIN_URL", f"{SHOP_API_URL}/auth/login")
 
 
 def _run_brute_force(duration_s: float, target_url: str):
@@ -143,6 +145,77 @@ def _run_region_outage(region: str, duration_s: float):
         set_region_paused(region, False)
     except Exception:
         pass
+
+
+def _guard_ledger_bodies(limit: int = 5) -> List[bytes]:
+    """The most recent payload bodies this shop's guard sent (exact bytes it signed), newest first."""
+    import sqlite3
+    from guard.config import config
+    try:
+        with sqlite3.connect(config.GUARD_DB_PATH) as conn:
+            return [r[0].encode("utf-8") for r in conn.execute("SELECT body FROM ledger ORDER BY seq DESC LIMIT ?", (limit,))]
+    except sqlite3.Error:
+        return []
+
+
+def _post_ingest(body: bytes, signed_body: Optional[bytes] = None) -> int:
+    """POST a body to this shop's ingest endpoint; the signature covers signed_body (default: the body itself)."""
+    import httpx
+    from datetime import datetime, timezone
+    from guard.config import config
+    from guard.signer import create_auth_headers
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    headers = create_auth_headers(config.GUARD_ID, signed_body if signed_body is not None else body, ts, config.GUARD_SECRET_KEY)
+    return httpx.post(config.REGION_URL, content=body, headers=headers, timeout=5, verify=config.TLS_VERIFY).status_code
+
+
+def _run_tamper() -> Dict[str, Any]:
+    """Two attacks on a copy of a real payload. Expect 401 (a byte flipped after signing) and 422 (a valid signature over
+    a body with a field the allow-list does not know). Nothing is stored; head office raises tamper alerts."""
+    import json
+    bodies = _guard_ledger_bodies(1)
+    base = bodies[0] if bodies else b'{"schema":"airlock.v1"}'
+    flipped = bytearray(base)
+    flipped[len(flipped) // 2] ^= 0x01
+    extra = json.loads(base)
+    extra["raw_log"] = "password=hunter2"
+    return {"byte_flipped": _post_ingest(bytes(flipped), signed_body=base), "extra_field": _post_ingest(json.dumps(extra).encode())}
+
+
+def _run_replay_shuffle() -> Dict[str, Any]:
+    """Re-sends the last payloads, shuffled, with fresh signatures. Head office already has them: expect 200 'duplicate' each
+    (counted on the reconciliation panel, nothing stored twice)."""
+    import random
+    bodies = _guard_ledger_bodies(5)
+    random.shuffle(bodies)
+    return {"replayed": len(bodies), "status_codes": [_post_ingest(b) for b in bodies]}
+
+
+def _run_shop_latency(duration_s: float, delay_ms: int) -> None:
+    """Windows/any OS: the shop API itself waits delay_ms per request, so the guard's probe measures it for real."""
+    import httpx
+    try:
+        httpx.post(f"{SHOP_API_URL}/chaos/latency", json={"delay_ms": delay_ms, "duration_s": int(duration_s)}, timeout=3)
+    except httpx.HTTPError:
+        pass
+
+
+def _restart_shop_api_by_pid() -> None:
+    """Windows/any OS: stop the running shop-api (pid from its /health) and start it again; the guard sees a new pid."""
+    import subprocess
+    import sys
+    import httpx
+    import psutil
+    try:
+        pid = int(httpx.get(f"{SHOP_API_URL}/health", timeout=2).json()["pid"])
+        psutil.Process(pid).terminate()
+    except Exception:
+        return
+    time.sleep(1.0)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen([sys.executable, os.path.join("shop-api", "main.py")], cwd=root, creationflags=flags,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _run_latency_netem(duration_s: float, delay_ms: int = 450, loss_pct: int = 3, iface: str = "lo"):
@@ -221,9 +294,22 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
         delay = int(p.get("delay_ms", 450))
         loss = int(p.get("loss_pct", 3))
         iface = str(p.get("interface", "lo"))
-        threading.Thread(target=_run_latency_netem, args=(duration_s, delay, loss, iface), daemon=True).start()
+        if sys.platform.startswith("linux"):
+            threading.Thread(target=_run_latency_netem, args=(duration_s, delay, loss, iface), daemon=True).start()
+        else:
+            threading.Thread(target=_run_shop_latency, args=(duration_s, delay), daemon=True).start()
     elif name == "restart_app":
-        threading.Thread(target=_run_restart_app, args=(target,), daemon=True).start()
+        worker = _run_restart_app if sys.platform.startswith("linux") else _restart_shop_api_by_pid
+        threading.Thread(target=worker, args=(target,) if worker is _run_restart_app else (), daemon=True).start()
+    elif name in ("tamper", "replay_shuffle"):
+        run = _run_tamper if name == "tamper" else _run_replay_shuffle
+
+        def record():
+            try:
+                entry["result"] = run()
+            except Exception as exc:   # ingest unreachable etc.
+                entry["result"] = {"error": str(exc)}
+        threading.Thread(target=record, daemon=True).start()
 
     return entry
 

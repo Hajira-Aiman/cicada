@@ -14,6 +14,8 @@ import socket
 import uuid
 import hashlib
 import logging
+import statistics
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
@@ -40,6 +42,7 @@ from guard.raw_store import RawStore
 from guard.scrubber import Scrubber
 from guard.detectors import AuthDetector, PowerDetector, ChangeDetector
 from guard.log_tailer import LogTailer
+from guard.log_patterns import PatternMiner
 from guard.policy_gate import PolicyGate
 from contracts.models import Checkpoint
 
@@ -80,6 +83,9 @@ class GuardThinSlice:
         self.host_pseudonym = self.pseudonym_mgr.get_or_create("host", self.hostname)
         self.pending_events: List[EventSample] = []
         self.pending_log_patterns: List[LogPatternSample] = []
+        self.pattern_miner = PatternMiner()
+        self.started_at = time.time()
+        self._loss_hist: deque = deque(maxlen=5)   # last 5 windows (~10 s) of packet-loss probes
 
         # Service pseudonyms registered in local reveal table
         self.service_pseudonyms = {
@@ -162,6 +168,7 @@ class GuardThinSlice:
 
         # Mask secrets in pipeline
         scrubbed_line, count = self.scrubber.scrub_text(raw_line)
+        self.pattern_miner.add(scrubbed_line)   # patterns are mined from the scrubbed line only
         if count > 0:
             self.emit_change_event(
                 category="secret_redacted",
@@ -251,6 +258,7 @@ class GuardThinSlice:
             res = client.get(health_url)
             elapsed_ms = max(0.5, (time.perf_counter() - start) * 1000.0)
             if res.status_code == 200:
+                self._watch_shop_process(res)
                 return 1.0, round(elapsed_ms, 2)
             else:
                 self.emit_change_event(
@@ -270,6 +278,14 @@ class GuardThinSlice:
         finally:
             if should_close:
                 client.close()
+
+    def _watch_shop_process(self, res) -> None:
+        """shop-api reports its pid; a new pid or start time since last window is an app_restarted change event."""
+        try:
+            pid = int(res.json()["pid"])
+            self.notify_shop_process(pid, psutil.Process(pid).create_time())
+        except Exception:
+            pass   # no pid in the response, or the service is not on this host
 
     def _get_ingest_host_port(self) -> Tuple[str, int]:
         """Extracts head-office ingest host and port for packet loss probes."""
@@ -410,7 +426,14 @@ class GuardThinSlice:
             )
 
         # Real packet loss probe to head-office ingest host:port
-        packet_loss_val = self.measure_packet_loss()
+        raw_loss = self.measure_packet_loss()
+        if getattr(self, "_packet_loss_override", None) is not None:
+            packet_loss_val = raw_loss
+        else:
+            # a Wi-Fi stall fails all ten connects in one window (0 % or 100 %, nothing between). The median of the last
+            # 5 windows (~10 s) ignores an isolated stall but still reports a sustained outage (3+ bad windows).
+            self._loss_hist.append(raw_loss)
+            packet_loss_val = round(statistics.median(self._loss_hist), 1)
         metrics.append(
             MetricSample(
                 name="packet_loss_pct",
@@ -454,6 +477,16 @@ class GuardThinSlice:
         )
 
         payload_id = str(uuid.uuid4())
+
+        # Drain3 patterns for this window; a new pattern, or a burst of ERROR lines, is also a (metadata-only) event
+        samples = self.pattern_miner.drain()
+        self.pending_log_patterns.extend(samples)
+        shop_src = self.service_pseudonyms["shop-api"]
+        for smp in samples:
+            if smp.is_new and time.time() - self.started_at > 60:   # the first minute learns the usual patterns
+                self.pending_events.append(EventSample(category="new_log_pattern", severity="info", source=shop_src, count=1, window_s=2))
+            if smp.level in ("ERROR", "CRITICAL") and smp.count >= 10:
+                self.pending_events.append(EventSample(category="log_pattern_spike", severity="medium", source=shop_src, count=smp.count, window_s=2))
 
         # Collect and drain pending events
         events_to_send = list(self.pending_events)

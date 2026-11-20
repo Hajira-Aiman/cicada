@@ -69,3 +69,44 @@ def test_packet_loss_probe_counts_refused_connections_and_is_fast():
     assert probe(stub, host="127.0.0.1", port=down_port) == 100.0
     assert time.time() - t0 < 3
     srv.close()
+
+
+def test_drain3_patterns_group_lines_and_never_carry_text(tmp_path):
+    import json
+    from guard.log_patterns import PatternMiner
+    m = PatternMiner()
+    if m.miner is None:
+        import pytest; pytest.skip("drain3 not installed")
+    for i in range(12):
+        m.add(json.dumps({"level": "WARNING", "message": f"Authentication failed for user 'u{i}' from 10.0.0.{i}"}))
+    m.add(json.dumps({"level": "INFO", "message": "Customer browsed catalog"}))
+    first = m.drain()
+    assert sum(s.count for s in first) == 13 and any(s.count == 12 and s.level == "WARNING" and s.is_new for s in first)
+    assert all(s.pattern_id.startswith("tpl-") for s in first)
+    m.add(json.dumps({"level": "WARNING", "message": "Authentication failed for user 'zz' from 10.9.9.9"}))
+    again = m.drain()
+    assert len(again) == 1 and again[0].is_new is False        # same pattern seen before: not new
+
+
+def test_baseline_floor_keeps_idle_network_noise_from_flagging():
+    from hq.aiops.engine import Engine, Thresholds
+    e = Engine()
+    th = Thresholds()
+    for i in range(40):
+        e.ingest("acme", "host-x", float(i), float(i), {"net_in_kbps": 8.0 + (i % 3) * 0.2})
+    e.ingest("acme", "host-x", 41.0, 41.0, {"net_in_kbps": 60.0})   # an ordinary burst on an idle NIC
+    assert abs(e.src[("acme", "host-x")].z["net_in_kbps"]) < 3
+    e.ingest("acme", "host-x", 42.0, 42.0, {"net_in_kbps": 900.0})  # a real exfil-sized burst still flags
+    assert abs(e.src[("acme", "host-x")].z["net_in_kbps"]) >= 3
+
+
+def test_packet_loss_median_ignores_one_stall_but_not_an_outage(tmp_path):
+    import statistics
+    from collections import deque
+    h = deque(maxlen=5)
+    for v in (0, 0, 100, 0, 0):
+        h.append(v)
+    assert statistics.median(h) == 0          # one stalled window: healthy
+    for v in (100, 100, 100):
+        h.append(v)
+    assert statistics.median(h) == 100        # sustained: reported

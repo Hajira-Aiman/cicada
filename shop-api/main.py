@@ -10,6 +10,7 @@ Demo E-Commerce Shop Service on port 7000 (T16):
 - Writes JSON-line logs to data/shop-api.log for the Guard log tailer
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -23,6 +24,16 @@ LOG_FILE_PATH = os.getenv("SHOP_LOG_PATH", "data/shop-api.log")
 Path(LOG_FILE_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Demo Shop API", version="1.0.0")
+
+
+_delay = {"until": 0.0, "ms": 0}   # chaos: every non-chaos request waits `ms` until `until`
+
+
+@app.middleware("http")
+async def artificial_latency(request: Request, call_next):
+    if time.time() < _delay["until"] and not request.url.path.startswith("/chaos"):
+        await asyncio.sleep(_delay["ms"] / 1000.0)
+    return await call_next(request)
 
 
 def log_shop_event(event_dict: Dict[str, Any]):
@@ -125,6 +136,18 @@ def checkout(req: CheckoutRequest, request: Request):
         "receipt_id": receipt_id,
         "amount": req.amount,
     }
+
+
+class LatencyRequest(BaseModel):
+    delay_ms: int = Field(default=450, ge=0, le=5000)
+    duration_s: int = Field(default=20, ge=1, le=300)
+
+
+@app.post("/chaos/latency")
+def chaos_latency(req: LatencyRequest):
+    """Slows every shop request by delay_ms for duration_s: the guard's health probe then reports real latency."""
+    _delay["ms"], _delay["until"] = req.delay_ms, time.time() + req.duration_s
+    return {"status": "slow", "delay_ms": req.delay_ms, "duration_s": req.duration_s}
 
 
 @app.post("/chaos/inject-log")

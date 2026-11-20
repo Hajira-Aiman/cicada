@@ -1,6 +1,15 @@
 // Shop Screen Local Data Service: talks to the shop's own Guard API on port 9000 only. No mock data: if the guard is down, the screen says so.
 const GUARD_API_URL = import.meta.env.VITE_GUARD_API_URL || 'http://localhost:9000';
 
+export async function askShopAI(question: string): Promise<string> {
+  const res = await fetch(`${GUARD_API_URL}/api/ask`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
+    signal: AbortSignal.timeout(60000),
+  });
+  if (!res.ok) throw new Error(`Shop AI unavailable (HTTP ${res.status})`);
+  return (await res.json()).answer;
+}
+
 export interface LocalGuardStatus {
   status: 'active' | 'degraded' | 'paused';
   buffer_depth: number;

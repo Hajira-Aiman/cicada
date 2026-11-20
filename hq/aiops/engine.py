@@ -53,13 +53,20 @@ class Thresholds:
         return cls(**{k: v for k, v in (o or {}).items() if k in ok})
 
 
+# Smallest spread (in the metric's own unit) that counts as a real deviation. Calibrated on a real idle laptop on hotspot
+# Wi-Fi: its network counters idle at a few kbps and burst by hundreds, its latency jitters by tens of ms, its CPU by a few %.
+STD_FLOOR = {"cpu_pct": 3.0, "mem_pct": 2.0, "disk_pct": 1.0, "net_in_kbps": 100.0, "net_out_kbps": 100.0,
+             "latency_ms": 15.0, "packet_loss_pct": 2.0}
+
+
 class Baseline:
     """Exponentially weighted mean + spread. Cumulative average while warming up."""
-    def __init__(self):
+    def __init__(self, floor=0.01):
         self.n, self.mean, self.var, self.streak = 0, 0.0, 0.0, 0
+        self.floor = floor
 
     def std(self):
-        return max(math.sqrt(self.var), 0.05 * abs(self.mean), 0.01)  # floor so flat metrics don't explode z
+        return max(math.sqrt(self.var), 0.05 * abs(self.mean), self.floor)  # floors so flat metrics don't explode z
 
     def z(self, x, th):
         return None if self.n < th.warmup else (x - self.mean) / self.std()
@@ -110,7 +117,7 @@ class Engine:
             st.last[name] = v
             if name in Z_METRICS:
                 until, bump = self.relaxed.get((tenant, source, name), (0, 0))
-                st.z[name] = self.base.setdefault((tenant, source, name), Baseline()).update(
+                st.z[name] = self.base.setdefault((tenant, source, name), Baseline(STD_FLOOR.get(name, 0.01))).update(
                     v, th, th.z_flag + bump if arrived < until else None)
         for cat, sev, *rest in events:  # optional extras: count, actor pseudonym
             st.events[cat] = (ts, sev, rest[0] if rest else 1, rest[1] if len(rest) > 1 else None)

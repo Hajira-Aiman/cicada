@@ -24,8 +24,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from contracts.request_auth import PRIVATE_ORIGIN_REGEX, guard_request_headers
+from contracts.request_auth import PRIVATE_ORIGIN_REGEX
+from guard.action_loop import pull_actions_forever
 from guard.config import GuardConfig
+from guard.executor import RemediationExecutor
+from guard.hq_client import hq_call as _hq_call
+from guard.shop_ai import ShopAIAssistant
 from guard.thin_slice import GuardThinSlice
 
 
@@ -100,6 +104,17 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
             "logs": logs,
         }
 
+    class AskRequest(BaseModel):
+        question: str = Field(..., max_length=500)
+
+    @api.post("/api/ask")
+    def ask_shop_ai(req: AskRequest, request: Request):
+        """Shop AI: answers from this shop's raw logs (local Lemonade model). Raw data never leaves this machine."""
+        client_ip = request.client.host if request.client else "127.0.0.1"
+        if client_ip not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            raise HTTPException(status_code=403, detail="The shop AI reads raw logs and is only reachable on the shop host")
+        return {"answer": ShopAIAssistant(raw_db_path=_guard.config.RAW_DB_PATH).chat(req.question)}
+
     @api.get("/api/egress")
     def get_egress():
         """
@@ -143,14 +158,7 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
 
     def hq_call(method, path, params=None, json_body=None):
         """Every guard -> head-office call is signed with this guard's secret (see contracts/request_auth.py)."""
-        import httpx
-        url = httpx.URL(f"{hq}{path}", params=params)
-        body = json.dumps(json_body).encode() if json_body is not None else b""
-        headers = guard_request_headers(_guard.config.GUARD_ID, _guard.config.GUARD_SECRET_KEY, method, url.raw_path.decode(), body)
-        headers["Content-Type"] = "application/json"
-        res = httpx.request(method, url, content=body, headers=headers, timeout=3, verify=_guard.config.TLS_VERIFY)
-        res.raise_for_status()
-        return res
+        return _hq_call(_guard.config, hq, method, path, params, json_body)
 
     def pull_reveals():
         """Head office never reaches into the shop: the guard asks for pending reveal requests for its own tenant."""
@@ -173,6 +181,13 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         except Exception:
             pass
 
+    executor = RemediationExecutor(_guard)
+
+    def pull_actions():
+        """Approved remediation intents are pulled, verified, run under local policy and reported (guard/action_loop.py)."""
+        pull_actions_forever(_guard, executor, hq_call)
+
+    api.state.pull_actions = pull_actions
     api.state.pull_reveals = pull_reveals   # started only when run as a program (see __main__), never on import or in tests
 
     @api.get("/api/reveal-requests")
@@ -256,5 +271,6 @@ if __name__ == "__main__":
     import uvicorn
     import threading
     threading.Thread(target=app.state.pull_reveals, daemon=True).start()
+    threading.Thread(target=app.state.pull_actions, daemon=True).start()
     port = int(os.getenv("GUARD_PORT", "9000"))
     uvicorn.run(app, host="127.0.0.1", port=port)

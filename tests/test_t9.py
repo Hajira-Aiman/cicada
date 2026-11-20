@@ -10,18 +10,18 @@ def feed(e, vals, t0=1000.0):
 
 
 def test_thumbs_down_raises_the_flag_level_for_30_minutes():
-    # steady 20 +- tiny noise, then a value ~3.2 sigma away (std floor = 5 % of the mean = 1.0)
+    # steady 20 +- tiny noise, then a value ~3.2 sigma away (cpu std floor = 3.0, see engine.STD_FLOOR)
     base = [20.0 + (0.1 if i % 2 else -0.1) for i in range(40)]
     plain, damped = Engine(), Engine()
     damped.thumbs_down("acme", "host-1", "cpu_pct", now=1000.0)
-    feed(plain, base + [23.3] * 3); feed(damped, base + [23.3] * 3)
+    feed(plain, base + [29.6] * 3); feed(damped, base + [29.6] * 3)
     assert plain.base[("acme", "host-1", "cpu_pct")].streak == 3       # flagged
     assert damped.base[("acme", "host-1", "cpu_pct")].streak == 0      # 3.2 < 3.5, not flagged
-    feed(damped, [30.0] * 3, t0=1200.0)
+    feed(damped, [45.0] * 3, t0=1200.0)
     assert damped.base[("acme", "host-1", "cpu_pct")].streak == 3      # real anomaly still flags
     e = Engine(); e.thumbs_down("acme", "host-1", "cpu_pct", now=1000.0)
     feed(e, base, t0=1000.0 + 1900)                                    # after 30 min: back to 3.0
-    feed(e, [23.3] * 3, t0=1000.0 + 1900 + 100)
+    feed(e, [29.6] * 3, t0=1000.0 + 1900 + 100)
     assert e.base[("acme", "host-1", "cpu_pct")].streak == 3
 
 
