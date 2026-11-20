@@ -8,11 +8,11 @@ const MODEL = '/models/laptop.glb';
 useGLTF.preload(MODEL);
 
 export interface Machine {
-  id: string; label: string; state: string; region: string;
+  id: string; tenant: string; label: string; state: string;
   risk: number;         // 0..1, shifts the glow from baseColor to red
   baseColor: string;    // healthy colour
   connected: boolean;   // offline = grey, no light
-  cpu: number; buffer: number; lastSeen: string;
+  buffer: number; lastSeen: string;
 }
 
 const SHOP_X = -9, GATE_X = 0, HQ_X = 10;
@@ -33,7 +33,21 @@ function Laptop({ m, z }: { m: Machine; z: number }) {
       }
     });
   }, [clone, glow, hot]);
+  const [open, setOpen] = useState(false);
+  const metrics = useLiveStore((s) => s.metrics);
+  const receipts = useLiveStore((s) => s.receipts);
+  const incidents = useLiveStore((s) => s.incidents);
+  const guard = useLiveStore((s) => s.guards[m.id]);
+  const last = (name: string) => (metrics[`${m.tenant}:${name}`] || []).slice(-1)[0]?.avg;
+  const fmt = (v: number | undefined, d = 0, unit = '') => (v === undefined ? '—' : `${v.toFixed(d)}${unit}`);
+  const mine = receipts.filter((r) => r.guard_id === m.id);
+  const perMin = mine.filter((r) => Date.now() - new Date(r.received_at).getTime() < 60000).length;
+  const openInc = incidents.filter((i) => i.tenant_id === m.tenant && i.status !== 'resolved').length;
   const ago = Math.max(0, Math.round((Date.now() - new Date(m.lastSeen).getTime()) / 1000));
+  const seen = m.connected ? `${ago}s ago` : 'offline';
+  const row = (k: string, v: React.ReactNode) => (
+    <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14 }}><span style={{ color: '#64748b' }}>{k}</span><span>{v}</span></div>
+  );
   const edge = STATE_COLOR[m.state] || '#38bdf8';
   return (
     <group position={[SHOP_X, 0, z]} rotation={[0, 0.5, 0]}>
@@ -50,17 +64,35 @@ function Laptop({ m, z }: { m: Machine; z: number }) {
       </mesh>
       {m.connected && <pointLight position={[0, 0.5, 0]} color={glow} intensity={hot ? 4 : 1.6} distance={9} />}
       <Html position={[0, 3.4, 0]} center distanceFactor={22} zIndexRange={[10, 0]}>
-        <div style={{ background: 'rgba(8,11,18,.88)', border: `1px solid ${edge}66`, borderRadius: 8, padding: '8px 10px',
-          fontFamily: 'ui-monospace,monospace', fontSize: 11, color: '#e2e8f0', minWidth: 170, pointerEvents: 'none', boxShadow: `0 0 18px ${edge}33` }}>
+        <div onClick={() => setOpen((o) => !o)} title="Click for details"
+          style={{ background: 'rgba(8,11,18,.9)', border: `1px solid ${edge}66`, borderRadius: 8, padding: '8px 10px', cursor: 'pointer',
+            fontFamily: 'ui-monospace,monospace', fontSize: 11, color: '#e2e8f0', minWidth: 190, boxShadow: `0 0 18px ${edge}33`, userSelect: 'none' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontWeight: 800 }}>
             <span>{m.label}</span>
             <span style={{ color: edge }}>● {m.state.toUpperCase()}</span>
           </div>
-          <div style={{ color: '#94a3b8', marginTop: 4, lineHeight: 1.5 }}>
-            {m.region === 'eu' ? 'EUROPE' : 'INDIA'} · data stays in region<br />
-            CPU {m.cpu.toFixed(0)}% · buffer {m.buffer}<br />
-            last seen {m.connected ? `${ago}s ago` : 'offline'}
+          <div style={{ marginTop: 5, lineHeight: 1.55 }}>
+            {row('CPU', fmt(last('cpu_pct'), 0, '%'))}
+            {row('Memory', fmt(last('mem_pct'), 0, '%'))}
+            {row('Latency', fmt(last('latency_ms'), 0, ' ms'))}
+            {row('Payloads/min', perMin)}
+            {row('Last seen', seen)}
           </div>
+          {open && (
+            <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid #ffffff22', lineHeight: 1.55 }}>
+              {row('Latest seq', mine[0]?.seq ?? '—')}
+              {row('Buffer depth', m.buffer)}
+              {row('Open incidents', openInc)}
+              {row('Net out', fmt(last('net_out_kbps'), 0, ' kbps'))}
+              {row('Disk', fmt(last('disk_pct'), 0, '%'))}
+              {row('Packet loss', fmt(last('packet_loss_pct'), 1, '%'))}
+              {row('Guard CPU / mem', `${guard ? guard.guard_cpu_pct.toFixed(1) : '—'}% / ${guard ? guard.guard_mem_mb.toFixed(0) : '—'} MB`)}
+              {row('Guard version', guard?.guard_version ?? '—')}
+              {row('Canaries / redacted', `${guard?.canaries_planted ?? 0} / ${guard?.secrets_redacted ?? 0}`)}
+              {row('Why', guard?.reasons?.[0] ?? '—')}
+            </div>
+          )}
+          <div style={{ marginTop: 5, color: '#475569', fontSize: 9, textAlign: 'right' }}>{open ? 'click to collapse' : 'click for details'}</div>
         </div>
       </Html>
     </group>

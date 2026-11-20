@@ -60,7 +60,7 @@ export const GuardInspector: React.FC = () => {
         <div className="grid grid-cols-2 gap-2.5">
           <div className="p-2.5 rounded bg-[#121620] border border-white/5">
             <span className="text-[10px] text-slate-500 uppercase block">TENANT & REGION</span>
-            <span className="text-sm font-bold text-white uppercase">{guard.tenant_id} ({guard.region})</span>
+            <span className="text-sm font-bold text-white uppercase">{guard.tenant_id === "acme" ? "System 1" : guard.tenant_id === "globex" ? "System 2" : guard.tenant_id}</span>
           </div>
           <div className="p-2.5 rounded bg-[#121620] border border-white/5">
             <span className="text-[10px] text-slate-500 uppercase block">GUARD VERSION</span>

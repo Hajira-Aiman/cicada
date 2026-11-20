@@ -14,18 +14,18 @@ export const LiveMapTab: React.FC = () => {
 
   const real: Machine[] = Object.values(guards)
     .map((g) => ({
-      id: g.guard_id,
+      id: g.guard_id, tenant: g.tenant_id,
       label: g.tenant_id === 'acme' ? 'SYSTEM 1' : g.tenant_id === 'globex' ? 'SYSTEM 2' : g.tenant_id.toUpperCase(),
-      state: g.state, region: g.region,
+      state: g.state,
       risk: RISK[g.state] ?? 0.2,
       baseColor: COLOR[g.tenant_id] || '#38bdf8',
       connected: Date.now() - new Date(g.last_seen).getTime() < 30000 && g.state !== 'Offline',
-      cpu: g.guard_cpu_pct, buffer: g.buffer_depth, lastSeen: g.last_seen,
+      buffer: g.buffer_depth, lastSeen: g.last_seen,
     }));
   // always two systems: one that has not reported yet shows as an offline laptop
-  const machines: Machine[] = [['acme', 'SYSTEM 1', 'in'], ['globex', 'SYSTEM 2', 'eu']].map(([t, label, region]) =>
-    real.find((m) => m.label === label) || { id: `guard-${t}-01`, label, state: 'Offline', region, risk: 0.2, baseColor: COLOR[t],
-      connected: false, cpu: 0, buffer: 0, lastSeen: new Date(0).toISOString() });
+  const machines: Machine[] = [['acme', 'SYSTEM 1', 'in'], ['globex', 'SYSTEM 2', 'eu']].map(([t, label]) =>
+    real.find((m) => m.label === label) || { id: `guard-${t}-01`, tenant: t, label, state: 'Offline', risk: 0.2, baseColor: COLOR[t],
+      connected: false, buffer: 0, lastSeen: new Date(0).toISOString() });
 
   return (
     <div className="h-[calc(100vh-3.5rem)] w-full p-4 flex flex-col space-y-3 font-mono text-xs">

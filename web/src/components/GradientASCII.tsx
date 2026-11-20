@@ -878,6 +878,7 @@ export const GradientASCII: React.FC<GradientASCIIProps> = ({
     document.addEventListener('visibilitychange', onVisibility);
     resize();
     wakeRef.current = wake;
+    wake();   // start drawing right away instead of waiting for the first pointer event
 
     const dispose = () => {
       if (disposed) return;

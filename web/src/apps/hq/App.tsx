@@ -9,10 +9,14 @@ import { IncidentsTab } from './pages/IncidentsTab';
 import { PrivacyTab } from './pages/PrivacyTab';
 import { useLiveSocket } from '../../services/liveSocket';
 import { useLiveSync } from '../../services/liveSync';
+import { LoginPage } from '../../features/LoginPage';
+import { useUiStore } from '../../stores/uiStore';
 
 export const HqApp: React.FC = () => {
   useLiveSocket(); // Single live WebSocket connection
   useLiveSync();   // Real REST poller for metrics & baselines
+  const token = useUiStore((s) => s.authToken);
+  if (!token) return <LoginPage />;   // nothing loads without a login
 
   return (
     <div className="flex h-screen flex-col bg-[#080A10] text-[#D1D5DB] overflow-hidden font-sans">
