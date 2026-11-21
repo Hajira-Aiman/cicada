@@ -268,10 +268,10 @@ def shop_scenarios(tok, shop):
 
     # 15 + 16: region pause -> buffer -> resume with no loss
     before = api("/api/reconciliation/guard-acme-01", tok)[1]
-    api("/api/regions/in/pause", None, "POST")
+    api("/api/regions/in/pause", tok, "POST")
     code = ingest("in", b'{"schema":"airlock.v1"}')
     time.sleep(25)
-    api("/api/regions/in/unpause", None, "POST")
+    api("/api/regions/in/unpause", tok, "POST")
     time.sleep(35)
     after = api("/api/reconciliation/guard-acme-01", tok)[1]
     record(15, "Region outage: ingest refuses (503), guard buffers, resumes oldest-first", "PASS" if code == 503 and after["max_seq"] > before["max_seq"] else "FAIL", f"ingest during pause={code}, max_seq {before['max_seq']} -> {after['max_seq']}")

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ResponsiveContainer, ComposedChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ReferenceArea, ReferenceLine } from 'recharts';
+import { ResponsiveContainer, ComposedChart, Bar, BarChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ReferenceArea, ReferenceLine } from 'recharts';
 import { apiFetch } from '@/services/apiClient';
 
 // Every number here is pulled from the backend: /api/metrics, /api/events, /api/health/history, /api/baselines and the shop's chaos agent.
@@ -61,7 +61,9 @@ export const TelemetryTab: React.FC = () => {
   const [marks, setMarks] = useState<Mark[]>([]);
   const [chaosUrl, setChaosUrl] = useState(() => { try { return localStorage.getItem('chaosUrl') || (import.meta.env.VITE_CHAOS_API_URL as string) || ''; } catch { return ''; } });
   const [chaosOk, setChaosOk] = useState<boolean | null>(null);
+  const [arrivals, setArrivals] = useState<number[]>([]);   // when each payload of this system reached head office
   const [now, setNow] = useState(Date.now());
+  const eventsRef = useRef<HTMLDivElement>(null);
   const lastSeen = useRef<Record<string, string>>({});
 
   // metrics: first load fetches the last hour, then only what is newer
@@ -99,8 +101,10 @@ export const TelemetryTab: React.FC = () => {
     let stop = false;
     const load = async () => {
       try {
-        const [e, h] = await Promise.all([apiFetch<{ events: Ev[] }>('/api/events?limit=500'), apiFetch<{ history: Hist[] }>('/api/health/history?limit=300')]);
+        const [e, h, pl] = await Promise.all([apiFetch<{ events: Ev[] }>('/api/events?limit=500'), apiFetch<{ history: Hist[] }>('/api/health/history?limit=300'),
+          apiFetch<{ payloads: any[] }>('/api/payloads?limit=2000', { timeoutMs: 15000 })]);
         if (stop) return;
+        setArrivals(pl.payloads.filter((x) => x.tenant_id === tenant).map((x) => new Date(x.received_at).getTime()).sort((a, b) => a - b));
         setEvents(e.events.filter((x) => x.tenant_id === tenant));
         setHist(h.history.filter((x) => x.tenant_id === tenant));
       } catch { /* retry */ }
@@ -131,6 +135,11 @@ export const TelemetryTab: React.FC = () => {
     return () => { stop = true; clearInterval(id); clearInterval(clock); };
   }, [chaosUrl]);
 
+  const pick = (id: string) => {
+    setScenario(id);
+    const target = SCENARIOS.find((x) => x.id === id)!;
+    if (target.events.length) setTimeout(() => eventsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);   // event scenarios: jump to the events
+  };
   const saveUrl = (v: string) => { setChaosUrl(v); try { localStorage.setItem('chaosUrl', v); } catch { /* ignore */ } };
   const from = now - rangeMs;
   const sc = SCENARIOS.find((s) => s.id === scenario)!;
@@ -171,6 +180,30 @@ export const TelemetryTab: React.FC = () => {
   const segs = histHere.map((h, i) => ({ s: Math.max(from, new Date(h.at).getTime()), e: i + 1 < histHere.length ? new Date(histHere[i + 1].at).getTime() : now, state: h.state }))
     .filter((x) => x.e > from);
 
+  // a gap is a stretch where no payload arrived (they normally come every 2 s): shaded grey on every chart
+  const gaps: [number, number][] = [];
+  for (let i = 1; i < arrivals.length; i++) if (arrivals[i] - arrivals[i - 1] > 8000 && arrivals[i] > from) gaps.push([Math.max(from, arrivals[i - 1]), arrivals[i]]);
+  if (arrivals.length && now - arrivals[arrivals.length - 1] > 8000) gaps.push([Math.max(from, arrivals[arrivals.length - 1]), now]);
+  const bucketMs = Math.max(2000, Math.round(rangeMs / 60 / 2000) * 2000);   // about 60 bars across the range
+  const nBars = Math.ceil(rangeMs / bucketMs);
+  const arrivalBars = Array.from({ length: nBars }, (_, i) => ({ t: from + i * bucketMs + bucketMs / 2, n: 0 }));
+  arrivals.forEach((t) => { const i = Math.floor((t - from) / bucketMs); if (i >= 0 && i < nBars) arrivalBars[i].n++; });
+  const failBars = Array.from({ length: nBars }, (_, i) => ({ t: from + i * bucketMs + bucketMs / 2, fails: 0, after: 0 }));
+  events.forEach((e) => {
+    const i = Math.floor((new Date(e.event_time).getTime() - from) / bucketMs);
+    if (i < 0 || i >= nBars) return;
+    if (e.category === 'auth_failure_burst') failBars[i].fails += e.count; else if (e.category === 'login_after_failures') failBars[i].after += e.count;
+  });
+  const sumCat = (cat: string, ms: number) => events.filter((e) => e.category === cat && new Date(e.event_time).getTime() >= now - ms).reduce((a, e) => a + e.count, 0);
+  const eventsFocus = sc.events.length > 0;
+  const tiles = [
+    { l: 'FAILED LOGINS (60 S)', v: sumCat('auth_failure_burst', 60e3), hot: sc.events.includes('auth_failure_burst') },
+    { l: 'LOGIN AFTER FAILURES (5 MIN)', v: sumCat('login_after_failures', 300e3), hot: sc.events.includes('login_after_failures') },
+    { l: 'HONEYPOT HITS (5 MIN)', v: sumCat('honeypot_hit', 300e3), hot: false },
+    { l: 'SECRETS REDACTED (5 MIN)', v: sumCat('secret_redacted', 300e3), hot: false },
+    { l: 'PAYLOAD GAPS IN RANGE', v: gaps.length, hot: !!sc.health },
+  ];
+
   return (
     <div className="p-5 space-y-4 max-w-[1700px] mx-auto font-mono text-xs">
       {/* controls */}
@@ -200,7 +233,7 @@ export const TelemetryTab: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[10px] uppercase tracking-widest text-sky-400 font-bold mr-2">SCENARIO</span>
           {SCENARIOS.map((s) => (
-            <button key={s.id} onClick={() => setScenario(s.id)}
+            <button key={s.id} onClick={() => pick(s.id)}
               className={`px-3 py-1 rounded border font-bold ${scenario === s.id ? 'bg-sky-500/20 border-sky-400 text-sky-200' : 'border-white/10 text-slate-400 hover:text-white'}`}>{s.label}</button>
           ))}
         </div>
@@ -236,6 +269,27 @@ export const TelemetryTab: React.FC = () => {
         </div>
       </div>
 
+      {/* payload arrival: what a region outage does */}
+      <div className={`hud-panel p-4 space-y-2 ${sc.health ? 'border border-amber-400/70' : ''}`}>
+        <div className="flex items-baseline justify-between">
+          <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">PAYLOADS REACHING HEAD OFFICE (PER {Math.round(bucketMs / 1000)} S){sc.health && <span className="ml-2 text-amber-300">◄ {sc.label}</span>}</span>
+          <span className="text-slate-500">grey bands on every chart below = no payload arrived</span>
+        </div>
+        <div style={{ height: 110 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={arrivalBars} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
+              <CartesianGrid stroke="#ffffff10" vertical={false} />
+              <XAxis dataKey="t" type="number" domain={[from, now]} ticks={ticks} tickFormatter={fmtT} tick={{ fontSize: 9, fill: '#64748b' }} />
+              <YAxis tick={{ fontSize: 9, fill: '#64748b' }} allowDecimals={false} />
+              <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} formatter={(v: any) => [v, 'payloads']} />
+              {gaps.map(([a, b2], i) => <ReferenceArea key={i} x1={a} x2={b2} fill="#94a3b8" fillOpacity={0.22} stroke="none" />)}
+              {shownMarks.map((k) => <ReferenceLine key={k.id} x={k.started_at * 1000} stroke="#fbbf24" strokeDasharray="3 3" label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />)}
+              <Bar dataKey="n" fill="#38bdf8" isAnimationActive={false} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
       {/* metric charts */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         {METRICS.map((m) => {
@@ -257,6 +311,7 @@ export const TelemetryTab: React.FC = () => {
                     <YAxis tick={{ fontSize: 9, fill: '#64748b' }} domain={m.step ? [0, 1] : [0, 'auto']} allowDecimals={false} />
                     <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} formatter={(v: any) => [Number(v).toFixed(2) + m.unit, m.label]} />
                     {b && !m.step && <ReferenceArea y1={Math.max(0, b.mean - 2 * b.std)} y2={b.mean + 2 * b.std} fill={m.color} fillOpacity={0.1} stroke="none" />}
+                    {gaps.map(([a, b2], i) => <ReferenceArea key={i} x1={a} x2={b2} fill="#94a3b8" fillOpacity={0.22} stroke="none" />)}
                     {shownMarks.map((k) => (
                       <ReferenceLine key={k.id} x={k.started_at * 1000} stroke={sc.names.includes(k.name) ? '#fbbf24' : '#ffffff55'} strokeDasharray="3 3"
                         label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />
@@ -271,8 +326,30 @@ export const TelemetryTab: React.FC = () => {
       </div>
 
       {/* security events */}
-      <div className="hud-panel p-4 space-y-2">
-        <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">SECURITY &amp; SYSTEM EVENTS ({evInRange.length} IN RANGE)</span>
+      <div ref={eventsRef} className={`hud-panel p-4 space-y-3 ${eventsFocus ? 'border border-amber-400/70' : ''}`}>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
+          {tiles.map((t) => (
+            <div key={t.l} className={`p-2.5 rounded bg-black/40 border ${t.hot ? 'border-amber-400/70' : 'border-white/5'}`}>
+              <div className="text-[9px] text-slate-400 font-bold uppercase">{t.l}</div>
+              <div className={`text-2xl font-black ${t.v > 0 && t.hot ? 'text-amber-300' : 'text-slate-100'}`}>{t.v}</div>
+            </div>
+          ))}
+        </div>
+        <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold block">LOGIN FAILURES PER {Math.round(bucketMs / 1000)} S{eventsFocus && <span className="ml-2 text-amber-300">◄ {sc.label}</span>}</span>
+        <div style={{ height: eventsFocus ? 200 : 120 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={failBars} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
+              <CartesianGrid stroke="#ffffff10" vertical={false} />
+              <XAxis dataKey="t" type="number" domain={[from, now]} ticks={ticks} tickFormatter={fmtT} tick={{ fontSize: 9, fill: '#64748b' }} />
+              <YAxis tick={{ fontSize: 9, fill: '#64748b' }} allowDecimals={false} />
+              <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} />
+              {shownMarks.map((k) => <ReferenceLine key={k.id} x={k.started_at * 1000} stroke="#fbbf24" strokeDasharray="3 3" label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />)}
+              <Bar dataKey="fails" name="failed logins" stackId="a" fill="#f43f5e" isAnimationActive={false} />
+              <Bar dataKey="after" name="login after failures" stackId="a" fill="#fbbf24" isAnimationActive={false} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold block">SECURITY &amp; SYSTEM EVENTS ({evInRange.length} IN RANGE)</span>
         <div className="relative h-14 rounded bg-black/40 border border-white/5 overflow-hidden">
           {evInRange.map((e) => {
             const x = ((new Date(e.event_time).getTime() - from) / (now - from)) * 100;

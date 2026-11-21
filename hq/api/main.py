@@ -344,25 +344,29 @@ def get_reconciliation_for_guard(guard_id: str, user: Dict[str, Any] = Depends(g
 
 
 @app.post("/api/regions/{region}/pause")
-def pause_region_endpoint(region: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+def pause_region_endpoint(region: str, user: Dict[str, Any] = Depends(get_guard_or_user)):
     if region not in ("in", "eu"):
         raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
-    if user and user.get("role") == "customer":
+    if user.get("role") == "customer":
         raise HTTPException(status_code=403, detail="Customer cannot pause regions")
+    if user.get("role") == "guard" and get_tenant_assigned_region(user["tenant_id"]) != region:   # the shop's chaos agent, for its own region only
+        raise HTTPException(status_code=403, detail="A guard may only pause its own tenant's region")
     set_region_paused(region, True)
-    actor = user.get("user_id", "chaos-console") if user else "chaos-console"
+    actor = user.get("user_id", "chaos-console")
     log_audit_event(actor=actor, action="region_paused", details={"region": region})
     return {"status": "ok", "region": region, "is_paused": True}
 
 
 @app.post("/api/regions/{region}/unpause")
-def unpause_region_endpoint(region: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+def unpause_region_endpoint(region: str, user: Dict[str, Any] = Depends(get_guard_or_user)):
     if region not in ("in", "eu"):
         raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
-    if user and user.get("role") == "customer":
+    if user.get("role") == "customer":
         raise HTTPException(status_code=403, detail="Customer cannot unpause regions")
+    if user.get("role") == "guard" and get_tenant_assigned_region(user["tenant_id"]) != region:   # the shop's chaos agent, for its own region only
+        raise HTTPException(status_code=403, detail="A guard may only unpause its own tenant's region")
     set_region_paused(region, False)
-    actor = user.get("user_id", "chaos-console") if user else "chaos-console"
+    actor = user.get("user_id", "chaos-console")
     log_audit_event(actor=actor, action="region_unpaused", details={"region": region})
     return {"status": "ok", "region": region, "is_paused": False}
 

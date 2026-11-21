@@ -98,3 +98,19 @@ def test_guard_follows_head_office_clock(tmp_path):
     assert g.clock_offset_s == 0
     g.learn_clock_offset("not a date")
     assert g.clock_offset_s == 0
+
+
+def test_region_pause_needs_a_login_or_the_guards_own_signature():
+    from fastapi.testclient import TestClient
+    from contracts.request_auth import guard_request_headers
+    from hq.api.main import app
+    from hq.db import init_all_databases, register_guard, set_region_paused
+    init_all_databases()
+    register_guard("guard-acme-01", "acme", "sec-acme-super-secret-key-2026")
+    c = TestClient(app)
+    assert c.post("/api/regions/in/pause").status_code == 401   # anonymous: used to work
+    h = guard_request_headers("guard-acme-01", "sec-acme-super-secret-key-2026", "POST", "/api/regions/in/pause", b"")
+    assert c.post("/api/regions/in/pause", headers=h).status_code == 200   # acme lives in India
+    h = guard_request_headers("guard-acme-01", "sec-acme-super-secret-key-2026", "POST", "/api/regions/eu/pause", b"")
+    assert c.post("/api/regions/eu/pause", headers=h).status_code == 403   # not its region
+    set_region_paused("in", False)

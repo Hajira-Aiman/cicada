@@ -148,12 +148,22 @@ def _run_kill_chain(duration_s: float):
 
 
 def _run_region_outage(region: str, duration_s: float):
-    """Real region outage: sets region_states.is_paused = True in airlock_core."""
+    """Real region outage. On the shop laptop (HQ_URL set) the chaos agent asks head office, signed with the guard's key, to pause
+    and later resume the region: writing to this laptop's own database would pause nothing. Without HQ_URL it is the same machine."""
     try:
-        from hq.db import set_region_paused
-        set_region_paused(region, True)
-        time.sleep(duration_s)
-        set_region_paused(region, False)
+        if os.getenv("HQ_URL"):
+            from guard.config import config
+            from guard.hq_client import hq_call
+            hq_call(config, os.environ["HQ_URL"], "POST", f"/api/regions/{region}/pause")
+            try:
+                time.sleep(duration_s)
+            finally:
+                hq_call(config, os.environ["HQ_URL"], "POST", f"/api/regions/{region}/unpause")
+        else:
+            from hq.db import set_region_paused
+            set_region_paused(region, True)
+            time.sleep(duration_s)
+            set_region_paused(region, False)
     except Exception:
         pass
 
