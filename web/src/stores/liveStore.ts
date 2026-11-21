@@ -14,6 +14,7 @@ import {
 
 interface LiveState {
   connected: boolean;
+  lastSync: number;   // when the dashboard last got a full answer from head office (ms)
   guards: Record<string, GuardInfo>;
   metrics: Record<string, MetricDataPoint[]>; // key: "guard_id:metric_name" or "tenant_id:metric_name"
   incidents: Incident[];
@@ -35,6 +36,7 @@ interface LiveState {
 
 export const useLiveStore = create<LiveState>((set, get) => ({
   connected: false,
+  lastSync: 0,
   guards: {},
   metrics: {},
   incidents: [],

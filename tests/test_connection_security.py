@@ -114,3 +114,25 @@ def test_region_pause_needs_a_login_or_the_guards_own_signature():
     h = guard_request_headers("guard-acme-01", "sec-acme-super-secret-key-2026", "POST", "/api/regions/eu/pause", b"")
     assert c.post("/api/regions/eu/pause", headers=h).status_code == 403   # not its region
     set_region_paused("in", False)
+
+
+def test_a_guard_publishes_its_checkpoint_and_the_dashboard_lists_it():
+    from fastapi.testclient import TestClient
+    from contracts.request_auth import guard_request_headers
+    from hq.api.main import app
+    from hq.db import init_all_databases, register_guard
+    import json as _json
+    init_all_databases()
+    register_guard("guard-acme-01", "acme", "sec-acme-super-secret-key-2026")
+    c = TestClient(app)
+    body = _json.dumps({"guard_id": "guard-acme-01", "up_to_seq": 0, "root": "sha256:" + "0" * 64}).encode()
+    h = guard_request_headers("guard-acme-01", "sec-acme-super-secret-key-2026", "POST", "/api/checkpoints/compare", body)
+    h["Content-Type"] = "application/json"
+    assert c.post("/api/checkpoints/compare", content=body, headers=h).status_code == 200
+    admin = c.post("/api/login", json={"username": "admin", "password": "admin123"}).json()["token"]
+    rows = c.get("/api/checkpoints", headers={"Authorization": f"Bearer {admin}"}).json()["checkpoints"]
+    assert any(r["guard_id"] == "guard-acme-01" and "checkpoint_at" in r for r in rows)
+    other = _json.dumps({"guard_id": "guard-globex-01", "up_to_seq": 0, "root": "x"}).encode()   # signed as acme, claims globex
+    h2 = guard_request_headers("guard-acme-01", "sec-acme-super-secret-key-2026", "POST", "/api/checkpoints/compare", other)
+    h2["Content-Type"] = "application/json"
+    assert c.post("/api/checkpoints/compare", content=other, headers=h2).status_code == 403

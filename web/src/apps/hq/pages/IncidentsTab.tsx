@@ -5,6 +5,7 @@ import { IncidentCard } from '@/components/IncidentCard';
 import { Incident } from '@/types';
 import { api } from '@/services/apiClient';
 import { DamageMap } from '@/components/DamageMap';
+import { SyncChip } from '@/components/SyncChip';
 
 export const IncidentsTab: React.FC = () => {
   const incidents = useLiveStore((s) => s.incidents);
@@ -70,6 +71,7 @@ export const IncidentsTab: React.FC = () => {
             ))}
           </div>
 
+          <SyncChip />
           <div className="text-right px-4 py-2 rounded bg-black/40 border border-white/5">
             <span className="text-[10px] text-slate-400 uppercase font-bold block">FLAPS PREVENTED</span>
             <span className="text-base font-black text-emerald-400">{counters.flaps_prevented}</span>

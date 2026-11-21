@@ -670,7 +670,11 @@ def run_loop(
                     duration_seconds=interval, probe_client=probe_client
                 )
                 guard.send_payload(payload, body_bytes, client=ingest_client)
-                guard.maybe_publish_checkpoint()
+                cp = guard.maybe_publish_checkpoint()
+                if cp and os.getenv("HQ_URL"):   # head office checks the root against its own copy of the ledger
+                    from guard.hq_client import hq_call
+                    hq_call(guard.config, os.environ["HQ_URL"], "POST", "/api/checkpoints/compare",
+                            json_body={"guard_id": cp.guard_id, "up_to_seq": cp.up_to_seq, "root": cp.root})
             except Exception:
                 # one bad window (a locked database, a dropped socket, a starved CPU) must never end the guard for good
                 logger.exception("Guard loop iteration failed; carrying on with the next window")

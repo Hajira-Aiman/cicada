@@ -18,9 +18,10 @@ export async function syncOnce() {
   const [tenants, health, recon, incs, alerts, metrics, payloads, acts, gd] = await Promise.all([
     api.getTenants(), api.getHealth(), api.getReconciliation(), api.getIncidents(), api.getAlerts(),
     apiFetch<{ metrics: any[] }>(`/api/metrics${lastMetricTime ? `?since=${encodeURIComponent(lastMetricTime)}` : ''}`),
-    api.getPayloads(), apiFetch<{ intents: any[] }>('/api/actions?limit=20').catch(() => ({ intents: [] as any[] })),
+    api.getPayloads().catch(() => ({ payloads: [] as any[] })), apiFetch<{ intents: any[] }>('/api/actions?limit=20').catch(() => ({ intents: [] as any[] })),
     apiFetch<{ guards: any[]; leaks: Record<string, number> }>('/api/guards').catch(() => ({ guards: [] as any[], leaks: {} as Record<string, number> })),
   ]);
+  const cps = await apiFetch<{ checkpoints: any[] }>('/api/checkpoints').catch(() => ({ checkpoints: [] as any[] }));
   const reported: Record<string, any> = Object.fromEntries(gd.guards.map((g) => [g.guard_id, g]));
   const region: Record<string, 'in' | 'eu'> = {};
   tenants.tenants.forEach((t) => (region[t.tenant_id] = t.assigned_region as 'in' | 'eu'));
@@ -91,6 +92,7 @@ export async function syncOnce() {
       state: ({ dry_run_done: 'dry_run', done: 'executed' } as any)[a.status] || a.status, result: a.details?.why || a.details?.impact,
       requested_by: 'aiops', approved_by: a.approved_by || undefined, at: a.created_at, rollback_window_s: 120 })),
     reconciliation: Object.fromEntries(recon.reconciliation.map((r) => [r.guard_id, r])),
+    checkpoints: Object.fromEntries(cps.checkpoints.map((c) => [c.guard_id, c])),
     counters: { ...s.counters, raw_alerts: sum('raw_alerts'), incidents: sum('incidents'), flaps_prevented: sum('flaps_prevented'),
       canaries_planted: Object.values(guards).reduce((n, g) => n + g.canaries_planted, 0),
       leaks_detected: Object.values(gd.leaks).reduce((n, v) => n + v, 0),
@@ -107,8 +109,12 @@ export function useLiveSync() {
     resetSync();
     useLiveStore.getState().clearForLive();
     let stop = false;
+    let busy = false;
     const tick = async () => {
-      try { await syncOnce(); useLiveStore.getState().setConnected(true); } catch { useLiveStore.getState().setConnected(false); }
+      if (busy) return;   // a slow answer must not pile requests up
+      busy = true;
+      try { await syncOnce(); useLiveStore.setState({ connected: true, lastSync: Date.now() }); } catch { useLiveStore.getState().setConnected(false); }
+      busy = false;
     };
     tick();
     const id = setInterval(() => !stop && tick(), 2000);

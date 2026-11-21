@@ -393,14 +393,37 @@ def get_checkpoint_for_guard(guard_id: str, up_to_seq: Optional[int] = None, use
     return compute_guard_checkpoint(guard_id, up_to_seq=up_to_seq)
 
 
+_latest_checkpoints: Dict[str, Dict[str, Any]] = {}   # newest verified/mismatched checkpoint per guard (refilled by each guard every 60 s)
+
+
+@app.get("/api/checkpoints")
+def list_latest_checkpoints(user: Dict[str, Any] = Depends(get_current_user)):
+    rows = list(_latest_checkpoints.values())
+    if own_tenant_only(user):
+        rows = [r for r in rows if r["tenant_id"] == user.get("tenant_id")]
+    return {"checkpoints": rows}
+
+
 @app.post("/api/checkpoints/compare")
-def compare_checkpoint(req: CompareCheckpointRequest, user: Dict[str, Any] = Depends(get_current_user)):
-    return compare_guard_checkpoint(
+def compare_checkpoint(req: CompareCheckpointRequest, user: Dict[str, Any] = Depends(get_guard_or_user)):
+    guard = lookup_guard(req.guard_id)
+    if user.get("role") == "guard" and user["guard_id"] != req.guard_id:
+        raise HTTPException(status_code=403, detail="A guard may only publish its own checkpoint")
+    if user.get("role") == "customer" and (not guard or guard["tenant_id"] != user.get("tenant_id")):
+        raise HTTPException(status_code=403, detail="Access denied to this guard's checkpoint")
+    result = compare_guard_checkpoint(
         guard_id=req.guard_id,
         up_to_seq=req.up_to_seq,
         guard_root=req.root,
         guard_hashes=req.hashes,
     )
+    if guard:
+        _latest_checkpoints[req.guard_id] = {
+            "guard_id": req.guard_id, "tenant_id": guard["tenant_id"], "up_to_seq": req.up_to_seq, "root": req.root,
+            "match": bool(result.get("match")), "first_differing_seq": result.get("first_differing_seq"),
+            "checkpoint_at": datetime.now(timezone.utc).isoformat(),
+        }
+    return result
 
 
 class CreateRevealRequest(BaseModel):

@@ -33,6 +33,10 @@ export async function apiFetch<T = any>(endpoint: string, options: RequestOption
 
     clearTimeout(timeoutId);
 
+    if (response.status === 401 && token) {
+      // the login expired (sessions last 24 h): go back to the login page instead of freezing on old numbers
+      useUiStore.getState().logout();
+    }
     if (!response.ok) {
       const errText = await response.text();
       let errMsg = `HTTP ${response.status}: ${response.statusText}`;

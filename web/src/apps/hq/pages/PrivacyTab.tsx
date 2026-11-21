@@ -2,6 +2,8 @@ import React from 'react';
 import { useLiveStore } from '@/stores/liveStore';
 import { ReconciliationTable } from '@/components/ReconciliationTable';
 import { CheckpointInfo, ReconciliationRow } from '@/types';
+import { SyncChip } from '@/components/SyncChip';
+import { Ago } from '@/features/NodeSidebar';
 
 export const PrivacyTab: React.FC = () => {
   const counters = useLiveStore((s) => s.counters);
@@ -42,9 +44,14 @@ export const PrivacyTab: React.FC = () => {
           </p>
         </div>
         <div className="text-right">
-          <span className="px-3.5 py-2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-bold text-xs inline-block">
-            ✓ ZERO DATA LEAKAGE VERIFIED
-          </span>
+          <div className="flex items-center gap-2 justify-end">
+            <SyncChip />
+            {counters.leaks_detected === 0 ? (
+              <span className="px-3.5 py-2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 font-bold text-xs inline-block">✓ ZERO DATA LEAKAGE VERIFIED</span>
+            ) : (
+              <span className="px-3.5 py-2 rounded bg-rose-500/20 text-rose-300 border border-rose-500/40 font-bold text-xs inline-block">✕ {counters.leaks_detected} CANARY LEAK(S) DETECTED</span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -57,9 +64,12 @@ export const PrivacyTab: React.FC = () => {
           <span className="text-[11px] text-slate-500">Every 60s, edge & cloud verify cryptographic log roots</span>
         </div>
 
+        {systemCheckpoints.length === 0 && (
+          <div className="hud-panel p-4 text-slate-500 text-xs">Waiting for the first checkpoint: each guard sends one every 60 seconds and head office checks it against its own copy of the ledger.</div>
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {systemCheckpoints.map((cp, idx) => {
-            const sysName = idx === 0 ? 'SYSTEM 1' : 'SYSTEM 2';
+          {systemCheckpoints.map((cp) => {
+            const sysName = cp.guard_id.includes('acme') ? 'SYSTEM 1' : cp.guard_id.includes('globex') ? 'SYSTEM 2' : cp.guard_id;
             return (
               <div key={cp.guard_id} className="hud-panel p-4 space-y-2.5 border-purple-500/30">
                 <div className="flex items-center justify-between">
@@ -67,12 +77,14 @@ export const PrivacyTab: React.FC = () => {
                     <span className="font-black text-white text-sm">{sysName}</span>
                     <span className="text-[10px] text-slate-400">({cp.guard_id})</span>
                   </div>
-                  <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${cp.match ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20' : 'text-rose-300 bg-rose-500/10 border-rose-500/30'}`}>
                     {cp.match ? '✓ ROOT MATCH' : '✕ MISMATCH'}
                   </span>
                 </div>
                 <div className="text-[11px] text-slate-300">
-                  Verified through Seq <strong className="text-white">#{cp.up_to_seq}</strong>
+                  {cp.match ? 'Verified' : 'Checked'} through Seq <strong className="text-white">#{cp.up_to_seq}</strong>
+                  {!cp.match && cp.first_differing_seq ? <> · first difference at Seq <strong className="text-rose-300">#{cp.first_differing_seq}</strong></> : null}
+                  {(cp as any).checkpoint_at && <> · <Ago iso={(cp as any).checkpoint_at} /></>}
                 </div>
                 <div className="p-2.5 rounded bg-[#080A10] border border-white/5 text-[10px] text-purple-300 font-mono break-all">
                   ROOT: {cp.root}

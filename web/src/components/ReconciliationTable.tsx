@@ -1,6 +1,18 @@
 import React from 'react';
 import { ReconciliationRow } from '../types';
-import { TimeText } from './TimeText';
+import { Ago } from '../features/NodeSidebar';
+
+// 1,2,3,7,8 -> "1-3, 7-8"; a long list stays readable
+const ranges = (nums: number[]): string => {
+  const out: string[] = [];
+  for (let i = 0; i < nums.length;) {
+    let j = i;
+    while (j + 1 < nums.length && nums[j + 1] === nums[j] + 1) j++;
+    out.push(j > i ? `${nums[i]}-${nums[j]}` : `${nums[i]}`);
+    i = j + 1;
+  }
+  return out.join(', ');
+};
 
 interface ReconciliationTableProps {
   rows: ReconciliationRow[];
@@ -13,9 +25,13 @@ export const ReconciliationTable: React.FC<ReconciliationTableProps> = ({ rows }
         <span className="text-[11px] font-mono uppercase tracking-widest text-slate-400 font-bold">
           STREAM RECONCILIATION & INTEGRITY (PRD #16)
         </span>
-        <span className="text-xs font-mono text-emerald-400 font-bold">
-          ZERO PACKET LOSS · ZERO GAPS
-        </span>
+        {rows.some((r) => r.gaps && r.gaps.length > 0) ? (
+          <span className="text-xs font-mono text-amber-300 font-bold">
+            {rows.reduce((n, r) => n + (r.gaps?.length || 0), 0)} MISSING SEQUENCE NUMBERS · {rows.reduce((n, r) => n + r.duplicate_count, 0)} DUPLICATES BLOCKED
+          </span>
+        ) : (
+          <span className="text-xs font-mono text-emerald-400 font-bold">ZERO PACKET LOSS · ZERO GAPS</span>
+        )}
       </div>
 
       <div className="overflow-x-auto">
@@ -47,13 +63,13 @@ export const ReconciliationTable: React.FC<ReconciliationTableProps> = ({ rows }
                   <td className="p-2.5 text-right font-tabular">{row.max_seq}</td>
                   <td className="p-2.5">
                     {hasGaps ? (
-                      <span className="text-rose-400 font-bold">{row.gaps.join(', ')}</span>
+                      <span className="text-rose-400 font-bold">{row.gaps.length} missing: {ranges(row.gaps)}</span>
                     ) : (
                       <span className="text-emerald-400">NONE</span>
                     )}
                   </td>
                   <td className="p-2.5">
-                    <TimeText timestamp={row.last_seen} />
+                    <Ago iso={row.last_seen} />
                   </td>
                 </tr>
               );
