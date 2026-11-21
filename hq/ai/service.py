@@ -2,7 +2,7 @@
 Sahiti's hq-api proxies POST /api/ai/chat here with the tenant taken from the login."""
 from fastapi import FastAPI
 from pydantic import BaseModel
-from hq.ai.assistant import ask
+from hq.ai.assistant import ask, explain
 
 app = FastAPI(title="Airlock head-office AI")
 
@@ -20,3 +20,14 @@ def health():
 @app.post("/chat")
 def chat(req: Chat):
     return ask(req.tenant_id, req.question)   # {"answer": str, "evidence_ids": [str]}
+
+
+class Explain(BaseModel):
+    tenant_id: str
+    kind: str   # "alert" | "incident"
+    id: str
+
+
+@app.post("/explain")
+def explain_one(req: Explain):
+    return explain(req.tenant_id, req.kind if req.kind in ("alert", "incident") else "alert", req.id)

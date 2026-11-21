@@ -760,6 +760,36 @@ class ChatRequest(BaseModel):
     tenant_id: Optional[str] = None
 
 
+class ExplainRequest(BaseModel):
+    kind: str
+    id: str
+    tenant_id: Optional[str] = None
+
+
+@app.post("/api/ai/explain")
+async def post_ai_explain(req: ExplainRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    """Explain one alert or incident from its own evidence (the AI service builds a small, tenant-scoped fact set)."""
+    if user.get("role") == "engineer":
+        if not req.tenant_id:
+            raise HTTPException(status_code=400, detail="Engineers must specify an explicit tenant_id in request body")
+        tenant_id = req.tenant_id
+    else:
+        tenant_id = user.get("tenant_id")
+        if not tenant_id or (req.tenant_id and req.tenant_id != tenant_id):
+            raise HTTPException(status_code=403, detail="Customer cannot query other tenants")
+    if req.kind not in ("alert", "incident"):
+        raise HTTPException(status_code=400, detail="kind must be 'alert' or 'incident'")
+    url = os.getenv("AI_SERVICE_URL", "http://localhost:8010/chat").rsplit("/", 1)[0] + "/explain"
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            res = await client.post(url, json={"tenant_id": tenant_id, "kind": req.kind, "id": req.id})
+            if res.status_code == 200:
+                return res.json()
+    except Exception:
+        pass
+    return {"parts": None, "evidence_ids": [], "source": "error", "message": "The AI service is not reachable right now."}
+
+
 @app.post("/ai/chat")
 @app.post("/api/ai/chat")
 async def post_ai_chat(req: ChatRequest, user: Dict[str, Any] = Depends(get_current_user)):

@@ -6,6 +6,7 @@ import { Incident } from '@/types';
 import { api } from '@/services/apiClient';
 import { DamageMap } from '@/components/DamageMap';
 import { SyncChip } from '@/components/SyncChip';
+import { ExplainAI } from '@/components/ExplainAI';
 
 export const IncidentsTab: React.FC = () => {
   const incidents = useLiveStore((s) => s.incidents);
@@ -97,18 +98,19 @@ export const IncidentsTab: React.FC = () => {
             </span>
             <span className="text-[10px] text-slate-500">Auto-correlated by AIOps</span>
           </div>
-          <div className="divide-y divide-white/5 max-h-56 overflow-y-auto pr-1">
+          <div className="divide-y divide-white/5 max-h-[28rem] overflow-y-auto pr-1">
             {activeAlerts.slice(0, 15).map((a) => {
               const sysLabel = a.tenant_id === 'acme' ? 'SYSTEM 1' : a.tenant_id === 'globex' ? 'SYSTEM 2' : a.tenant_id.toUpperCase();
               return (
-                <div key={a.alert_id} className="flex items-center justify-between py-2 text-[11px]">
-                  <div className="flex items-center space-x-2">
+                <div key={a.alert_id} className="flex flex-wrap items-center gap-2 py-2 text-[11px]">
+                  <div className="flex items-center space-x-2 flex-1 min-w-0">
                     <span className="px-1.5 py-0.5 rounded text-[9px] bg-slate-800 text-sky-400 font-bold border border-white/5">
                       {sysLabel}
                     </span>
                     <span className="text-slate-200">{a.title}</span>
                     <span className="text-slate-500">[{a.severity}, {a.status}]</span>
                   </div>
+                  <div className="contents">
                   <button
                     disabled={voted[a.alert_id]}
                     className="px-2 py-0.5 rounded border border-slate-700 hover:bg-slate-700 disabled:opacity-40 text-xs"
@@ -119,6 +121,8 @@ export const IncidentsTab: React.FC = () => {
                   >
                     {voted[a.alert_id] ? '✓ NOTED' : '👎 DAMP'}
                   </button>
+                  <ExplainAI kind="alert" id={a.alert_id} tenant={a.tenant_id} />
+                  </div>
                 </div>
               );
             })}

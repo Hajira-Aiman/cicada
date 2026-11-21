@@ -5,6 +5,7 @@ import { TimeText } from './TimeText';
 import { useLiveStore } from '../stores/liveStore';
 import { api, apiFetch } from '../services/apiClient';
 import { useUiStore } from '../stores/uiStore';
+import { ExplainAI } from './ExplainAI';
 
 interface IncidentCardProps {
   incident: Incident;
@@ -129,6 +130,8 @@ Rollback: ${rec.rollback || 'n/a'}`);
           </div>
         </div>
       </div>
+
+      <div className="flex flex-wrap items-start"><ExplainAI kind="incident" id={incident.incident_id} tenant={incident.tenant_id} /></div>
 
       {/* Affected Topology Nodes */}
       <div className="flex items-center space-x-2 text-xs font-mono">
