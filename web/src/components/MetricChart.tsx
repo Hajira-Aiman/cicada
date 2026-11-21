@@ -10,6 +10,8 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { MetricDataPoint } from '../types';
+import { formatClock } from './TimeText';
+import { useUiStore } from '../stores/uiStore';
 
 interface MetricChartProps {
   title: string;
@@ -28,11 +30,12 @@ export const MetricChart: React.FC<MetricChartProps> = ({
   color = '#06B6D4',
   height = 160,
 }) => {
+  const tzMode = useUiStore((s) => s.tzMode);
   const chartData = data.map((d, i) => {
     const hasBand = d.baseline !== undefined && d.spread !== undefined;
     return {
       index: i,
-      time: d.event_time ? d.event_time.substring(11, 19) : '',
+      time: d.event_time ? formatClock(d.event_time, tzMode, undefined, true).replace(/ LOCAL$/, '') : '',
       value: d.avg,
       max: d.max,
       band: hasBand ? [Math.max(0, d.baseline! - d.spread!), d.baseline! + d.spread!] : undefined,

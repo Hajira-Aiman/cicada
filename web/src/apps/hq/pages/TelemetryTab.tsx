@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ResponsiveContainer, ComposedChart, Bar, BarChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ReferenceArea, ReferenceLine } from 'recharts';
 import { apiFetch } from '@/services/apiClient';
+import { formatClock } from '@/components/TimeText';
+import { useUiStore } from '@/stores/uiStore';
 
 // Every number here is pulled from the backend: /api/metrics, /api/events, /api/health/history, /api/baselines and the shop's chaos agent.
 
@@ -37,7 +39,6 @@ const STATE_COLOR: Record<string, string> = { excellent: '#34d399', good: '#a3e6
 const SYSTEMS = [{ id: 'acme', label: 'SYSTEM 1' }, { id: 'globex', label: 'SYSTEM 2' }];
 
 const median = (a: number[]) => { if (!a.length) return NaN; const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
-const fmtT = (t: number) => new Date(t).toISOString().substring(11, 19);
 
 function bucket(pts: Pt[], from: number, to: number, n = 150): Pt[] {
   // keep the peak of each bucket so a short spike is never averaged away
@@ -51,6 +52,8 @@ function bucket(pts: Pt[], from: number, to: number, n = 150): Pt[] {
 }
 
 export const TelemetryTab: React.FC = () => {
+  const tzMode = useUiStore((s) => s.tzMode);
+  const fmtT = (t: number) => formatClock(t, tzMode);   // follows the top-bar zone switch (it used to print UTC regardless)
   const [tenant, setTenant] = useState('acme');
   const [rangeMs, setRangeMs] = useState(RANGES[0].ms);
   const [scenario, setScenario] = useState(SCENARIOS[0].id);
@@ -305,7 +308,7 @@ export const TelemetryTab: React.FC = () => {
           <>
             <div className={`text-lg font-black ${verdict ? 'text-emerald-400' : 'text-amber-300'}`}>{verdict ? '✓ SEEN ON THE DASHBOARD' : '… NOT SEEN (YET)'}</div>
             {result.lines.map((l, i) => <div key={i} className={l.ok ? 'text-emerald-300' : 'text-amber-200'}>{l.ok ? '✓' : '•'} {l.text}</div>)}
-            <div className="text-slate-500">Run at {fmtT(result.m.started_at * 1000)} UTC for {result.m.duration_s} s</div>
+            <div className="text-slate-500">Run at {fmtT(result.m.started_at * 1000)} for {result.m.duration_s} s</div>
           </>
         ) : (
           <div className="text-slate-500">{chaosOk ? 'No run yet. Start this scenario from the chaos console.' : 'Turn on markers (top right) to see when a scenario ran and whether it showed up.'}</div>

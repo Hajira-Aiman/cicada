@@ -4,7 +4,6 @@ import { useUiStore } from '@/stores/uiStore';
 import { IncidentCard } from '@/components/IncidentCard';
 import { Incident } from '@/types';
 import { api } from '@/services/apiClient';
-import { DamageMap } from '@/components/DamageMap';
 import { SyncChip } from '@/components/SyncChip';
 import { ExplainAI } from '@/components/ExplainAI';
 
@@ -85,9 +84,6 @@ export const IncidentsTab: React.FC = () => {
           </button>
         </div>
       </div>
-
-      {/* Topology damage map */}
-      <DamageMap tenant={activeTenant === 'ALL' ? 'acme' : activeTenant} />
 
       {/* Collapsible Raw Alerts Section */}
       {showAlertsDrawer && (

@@ -7,6 +7,16 @@ import { api, apiFetch } from '../services/apiClient';
 import { useUiStore } from '../stores/uiStore';
 import { ExplainAI } from './ExplainAI';
 
+// The backend writes path times as "HH:MM:SSZ" (UTC). Show them in the viewer's chosen zone like every other time on the page.
+const pathStep = (step: string, startedAt: string): React.ReactNode =>
+  step.split(/(\d{2}:\d{2}:\d{2}Z)/).map((part, i) => {
+    if (!/^\d{2}:\d{2}:\d{2}Z$/.test(part)) return part;
+    const t = part.slice(0, 8);
+    let ts = `${startedAt.slice(0, 10)}T${part}`;
+    if (t < startedAt.slice(11, 19)) ts = new Date(Date.parse(ts) + 86400000).toISOString();   // path crossed midnight UTC
+    return <TimeText key={i} timestamp={ts} className="text-slate-300" />;
+  });
+
 interface IncidentCardProps {
   incident: Incident;
   onSelectEvidence?: (evidenceId: string) => void;
@@ -187,7 +197,7 @@ Rollback: ${rec.rollback || 'n/a'}`);
               <span className="w-4 h-4 rounded-full bg-slate-700 flex items-center justify-center text-[10px] text-white shrink-0">
                 {idx + 1}
               </span>
-              <span className="truncate">{step}</span>
+              <span className="truncate">{pathStep(step, incident.started_at)}</span>
             </div>
           ))}
         </div>

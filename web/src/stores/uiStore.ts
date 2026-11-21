@@ -27,7 +27,7 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   selectedGuardId: 'guard-acme-01',
   activeTenant: 'ALL',
-  tzMode: 'UTC',
+  tzMode: 'VIEWER',   // the viewer's own clock by default; UTC and the shop's zone are one click away in the top bar
   cameraPreset: 'OVERVIEW',
   activeLayers: ['HEALTH', 'PAYLOAD', 'RECEIPT', 'BUFFER', 'LOCAL', 'STATS'],
   copilotOpen: false,

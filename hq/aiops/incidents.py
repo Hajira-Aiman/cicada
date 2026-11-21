@@ -100,7 +100,8 @@ class Inc:
         return max((s["sev"] for s in self.sig.values()), key=SEV_RANK.get, default="low")
 
     def weights(self):
-        w = {k: (abs(s["z"]) if s["z"] is not None else min(s["count"] / EVENT_BASELINE, EVENT_WEIGHT_CAP))
+        # both kinds capped at the same value: an uncapped z of a few hundred (tiny baseline spread) hid every other signal
+        w = {k: min(abs(s["z"]) if s["z"] is not None else s["count"] / EVENT_BASELINE, EVENT_WEIGHT_CAP)
              for k, s in self.sig.items()}
         tot = sum(w.values()) or 1.0
         return {k: 100.0 * v / tot for k, v in w.items()}
@@ -186,7 +187,8 @@ class Inc:
         sigs = [SignalEvidence(evidence_id=f"ev-{i}", name=n, value=s["value"], baseline=s["baseline"], z=s["z"],
                                contribution_pct=round(contrib[(src, n)], 1))
                 for i, ((src, n), s) in enumerate(order, 1)]
-        path = [f"{LABEL.get(n, n)} at {iso(s['first'])[11:19]}" + (f" (x{s['repeats']})" if s["repeats"] > 1 else "")
+        # trailing Z = UTC; the incident card re-renders these in the viewer's chosen time zone
+        path = [f"{LABEL.get(n, n)} at {iso(s['first'])[11:19]}Z" + (f" (x{s['repeats']})" if s["repeats"] > 1 else "")
                 for (_src, n), s in order]
         path += [f"rule matched: {r}" for r in sorted(self.rules)]
         if self.river:

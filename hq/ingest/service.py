@@ -221,6 +221,14 @@ def process_ingest_payload(
         log_audit_event(
             actor=guard_id, action="schema_violation", tenant_id=tenant_id, details={"error": str(exc)}
         )
+        # visible on the dashboard like a bad signature is; the details name the problem, never echo the rejected body
+        record_tamper_alert(
+            tenant_id=tenant_id,
+            tamper_type="schema_violation",
+            title=f"Tamper: Payload from {guard_id} broke the allow-list schema (rejected)",
+            severity="high",
+            details={"guard_id": guard_id},
+        )
         return 422, {"error": f"Schema contract violation: {exc}"}
 
     # 5. Pinned policy hash per tenant

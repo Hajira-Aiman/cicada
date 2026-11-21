@@ -273,7 +273,7 @@ def get_payloads(limit: int = Query(300, ge=1, le=2000), user: Dict[str, Any] = 
         user, "payloads LEFT JOIN receipts USING (payload_id)",
         select_cols="payloads.payload_id, payloads.guard_id, payloads.tenant_id, payloads.seq, payloads.prev_hash, payloads.sent_at, "
                     "payloads.window_start, payloads.window_end, payloads.received_at, receipts.sha256, receipts.status AS receipt_status",
-        order_by="payloads.seq DESC", limit=limit)
+        order_by="payloads.received_at DESC", limit=limit)   # not seq: a guard restart resets seq, which buried the newest rows
     return {"payloads": rows}
 
 
@@ -282,7 +282,7 @@ def get_guards(user: Dict[str, Any] = Depends(get_current_user)):
     """Each guard's self-reported health (from its newest stored payload) plus per-tenant leak counts."""
     rows = query_tenant_data(
         user, "payloads", select_cols="guard_id, tenant_id, seq, raw_payload, received_at",
-        where="seq = (SELECT MAX(p2.seq) FROM payloads p2 WHERE p2.guard_id = payloads.guard_id)")
+        where="received_at = (SELECT MAX(p2.received_at) FROM payloads p2 WHERE p2.guard_id = payloads.guard_id)")
     guards = []
     for r in rows:
         raw = r["raw_payload"]

@@ -9,6 +9,8 @@ const TABS = [
   { path: '/telemetry', label: 'TELEMETRY VIEW' },
   { path: '/incidents', label: 'INCIDENTS & ALERTS' },
   { path: '/privacy', label: 'PRIVACY & PROOF' },
+  { path: '/leak-proof', label: 'LEAK TEST' },
+  { path: '/tamper', label: 'TAMPER TEST' },
 ];
 
 export const TopNav: React.FC = () => {
@@ -16,6 +18,8 @@ export const TopNav: React.FC = () => {
   const token = useUiStore((s) => s.authToken);
   const userId = useUiStore((s) => s.currentUserId);
   const logout = useUiStore((s) => s.logout);
+  const tzMode = useUiStore((s) => s.tzMode);
+  const setTzMode = useUiStore((s) => s.setTzMode);
 
   return (
     <>
@@ -60,6 +64,18 @@ export const TopNav: React.FC = () => {
           </nav>
         </div>
         <div className="ml-auto flex items-center space-x-2 text-xs font-mono">
+          {/* time zone for every clock on the dashboard */}
+          <div className="flex rounded border border-white/10 overflow-hidden" title="Time zone for every timestamp on the dashboard">
+            {([['UTC', 'UTC'], ['VIEWER', 'LOCAL'], ['SHOP', 'SHOP']] as const).map(([m, label]) => (
+              <button
+                key={m}
+                onClick={() => setTzMode(m)}
+                className={`px-2.5 py-1.5 font-bold ${tzMode === m ? 'bg-sky-500/20 text-sky-300' : 'bg-slate-900 text-slate-400 hover:text-slate-200'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           <span className="text-slate-400">{userId}</span>
           <button
             onClick={logout}

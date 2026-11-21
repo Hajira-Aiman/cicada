@@ -2,7 +2,7 @@
 import { api } from './apiClient';
 
 const SHOP_API_URL = import.meta.env.VITE_SHOP_API_URL || 'http://localhost:7000';
-const CHAOS_API_URL = import.meta.env.VITE_CHAOS_API_URL || 'http://localhost:9100';
+export const CHAOS_API_URL =import.meta.env.VITE_CHAOS_API_URL || 'http://localhost:9100';
 
 export interface ChaosScenario {
   id: string;

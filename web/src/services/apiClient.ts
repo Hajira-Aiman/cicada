@@ -126,6 +126,4 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ alert_id: alertId, tenant_id: tenantId, user_id: userId }),
     }),
-  getDamageMap: (tenantId: string) =>
-    apiFetch<{ nodes: { id: string; state: 'ok' | 'impacted' | 'affected' }[]; edges: { from: string; to: string }[] }>(`/api/damage-map/${tenantId}`),
 };
