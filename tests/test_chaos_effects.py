@@ -74,3 +74,13 @@ def test_cpu_burner_is_capped_and_low_priority():
     load = psutil.cpu_percent(None)
     t.join()
     assert load < 97   # never pinned at 100% like the old burner, so the guard keeps running
+
+
+def test_chaos_history_records_every_scenario_start():
+    from fastapi.testclient import TestClient
+    from chaos import agent
+    agent._history.clear()
+    c = TestClient(agent.app)
+    c.post("/scenarios/latency", json={"duration_s": 1})
+    h = c.get("/chaos/history").json()["history"]
+    assert [x["name"] for x in h] == ["latency"] and h[0]["duration_s"] == 1 and h[0]["started_at"] > 0

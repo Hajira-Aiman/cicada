@@ -7,6 +7,7 @@ import { OverviewTab } from './pages/OverviewTab';
 import { LiveMapTab } from './pages/LiveMapTab';
 import { IncidentsTab } from './pages/IncidentsTab';
 import { PrivacyTab } from './pages/PrivacyTab';
+import { TelemetryTab } from './pages/TelemetryTab';
 import { useLiveSocket } from '../../services/liveSocket';
 import { useLiveSync } from '../../services/liveSync';
 import { LoginPage } from '../../features/LoginPage';
@@ -25,6 +26,7 @@ export const HqApp: React.FC = () => {
         <Routes>
           <Route path="/overview" element={<OverviewTab />} />
           <Route path="/live-map" element={<LiveMapTab />} />
+          <Route path="/telemetry" element={<TelemetryTab />} />
           <Route path="/incidents" element={<IncidentsTab />} />
           <Route path="/privacy" element={<PrivacyTab />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />

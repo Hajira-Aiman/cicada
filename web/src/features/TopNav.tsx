@@ -6,6 +6,7 @@ import { useLiveStore } from '../stores/liveStore';
 const TABS = [
   { path: '/overview', label: 'OVERVIEW' },
   { path: '/live-map', label: 'LIVE MAP' },
+  { path: '/telemetry', label: 'TELEMETRY VIEW' },
   { path: '/incidents', label: 'INCIDENTS & ALERTS' },
   { path: '/privacy', label: 'PRIVACY & PROOF' },
 ];

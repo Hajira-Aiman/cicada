@@ -39,6 +39,7 @@ app.add_middleware(
 
 # Active chaos state registry
 _active_scenarios: Dict[str, Dict[str, Any]] = {}
+_history: List[Dict[str, Any]] = []   # every scenario started since the agent came up (the dashboard draws these as markers)
 _lock = threading.Lock()
 
 
@@ -285,6 +286,8 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
             "params": params or {},
         }
         _active_scenarios[name] = entry
+        _history.append({"id": scn_id, "name": name, "started_at": now, "duration_s": duration_s, "target": entry["target"]})
+        del _history[:-200]
 
     # Trigger real effect in background worker thread
     p = params or {}
@@ -358,6 +361,12 @@ def list_scenarios():
             "restart_app",
         ]
     }
+
+
+@app.get("/chaos/history")
+def get_history():
+    with _lock:
+        return {"history": list(_history)}
 
 
 @app.get("/chaos/active")
