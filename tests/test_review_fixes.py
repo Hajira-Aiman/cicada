@@ -50,10 +50,10 @@ def test_engine_retires_silent_sources_only():
     from hq.aiops.engine import Engine
     e = Engine()
     e.ingest("acme", "host-old", 1000.0, 1000.0, {"cpu_pct": 10.0})
-    e.ingest("acme", "host-live", 1590.0, 1590.0, {"cpu_pct": 10.0})
+    e.ingest("acme", "proc-live", 1590.0, 1590.0, {"cpu_pct": 10.0})   # a different kind of source: it replaces nothing
     assert e.retire(1599.0) == []                      # old one silent 599 s: still shown (offline)
     assert e.retire(1601.0) == [("acme", "host-old")]  # 601 s: forgotten, with its baselines
-    assert ("acme", "host-live") in e.src and not any(k[1] == "host-old" for k in e.base)
+    assert ("acme", "proc-live") in e.src and not any(k[1] == "host-old" for k in e.base)
 
 
 def test_packet_loss_probe_counts_refused_connections_and_is_fast():
@@ -127,3 +127,13 @@ def test_guard_loop_survives_a_failing_window(tmp_path):
     guard.collect_window = flaky
     run_loop(guard, interval=0.01, max_iterations=3)   # used to die on the first exception
     assert len(calls) == 3
+
+
+def test_a_replaced_process_is_forgotten_after_a_minute_but_a_lone_silent_source_is_kept():
+    from hq.aiops.engine import Engine
+    e = Engine()
+    e.ingest("acme", "proc-old", 1000.0, 1000.0, {"latency_ms": 5.0})
+    e.ingest("acme", "proc-new", 1100.0, 1100.0, {"latency_ms": 5.0})
+    e.ingest("acme", "host-a", 1000.0, 1000.0, {"cpu_pct": 5.0})          # the only host: silent, but nothing replaced it
+    assert e.retire(1105.0) == [("acme", "proc-old")]                     # a newer proc exists, old one silent > 60 s
+    assert ("acme", "host-a") in e.src

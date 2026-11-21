@@ -29,7 +29,6 @@ const SCENARIOS: { id: string; label: string; names: string[]; metrics: string[]
   { id: 'latency', label: 'LATENCY SPIKE', names: ['latency'], metrics: ['latency_ms', 'packet_loss_pct'], events: [], hint: 'The shop answers slower, so latency should jump.', focus: ['latency_ms'] },
   { id: 'brute_force', label: 'BRUTE FORCE', names: ['brute_force', 'login_burst'], metrics: [], events: ['auth_failure_burst', 'login_after_failures'], hint: 'A burst of failed logins should appear as one tall bar.', focus: ['logins'] },
   { id: 'kill_chain', label: 'KILL CHAIN', names: ['kill_chain'], metrics: ['cpu_pct', 'net_out_kbps'], events: ['auth_failure_burst', 'login_after_failures'], hint: 'Failed logins, then CPU, then outbound traffic: one critical incident.', focus: ['cpu_pct', 'net_out_kbps'] },
-  { id: 'region_outage', label: 'REGION OUTAGE', names: ['region_outage', 'outage'], metrics: [], events: [], health: true, hint: 'Payloads stop arriving (grey gap), then catch up.', focus: ['arrivals'] },
   { id: 'backup_job', label: 'BACKUP JOB', names: ['backup_job'], metrics: ['cpu_pct'], events: [], hint: 'Repeating CPU pulses: the system learns them as a normal schedule.', focus: ['cpu_pct'] },
 ];
 

@@ -46,6 +46,7 @@ class Thresholds:
     exit_s: float = 20.0        # good data this long before returning to a better one
     event_hold_s: float = 10.0  # how long an event keeps its health effect
     retire_s: float = 600.0     # a source silent this long is forgotten (shown offline until then)
+    replaced_s: float = 60.0    # ...or this long when another live source of the same kind has taken its place (a restarted process)
 
     @classmethod
     def with_overrides(cls, o: dict | None):
@@ -185,7 +186,13 @@ class Engine:
     def retire(self, now):
         """Forget sources that have been silent for retire_s so a replaced or removed host does not stay 'poor' forever.
         Returns [(tenant, source)] retired; a source that comes back simply starts fresh."""
-        gone = [(t, s) for (t, s), st in self.src.items() if now - (st.last_arrival or 0) >= self.th(t).retire_s]
+        def replaced(t, s, st):
+            kind = s.split("-")[0]
+            return now - (st.last_arrival or 0) >= self.th(t).replaced_s and any(
+                k[0] == t and k[1] != s and k[1].split("-")[0] == kind and now - (o.last_arrival or 0) < self.th(t).stale_s
+                for k, o in self.src.items())
+        gone = [(t, s) for (t, s), st in self.src.items()
+                if now - (st.last_arrival or 0) >= self.th(t).retire_s or replaced(t, s, st)]
         for t, s in gone:
             del self.src[(t, s)]
             for k in [k for k in self.base if k[:2] == (t, s)]:

@@ -48,10 +48,12 @@ export async function syncOnce() {
   // ---- guards: one per reconciliation row, health = worst state of that tenant's sources
   const guards: Record<string, GuardInfo> = {};
   for (const r of recon.reconciliation) {
-    const rows = health.health.filter((h) => h.tenant_id === r.tenant_id);
+    const silentS = (Date.now() - new Date(r.last_seen).getTime()) / 1000;   // payloads stopped arriving
+    // while the guard is sending, a source that stopped reporting is a leftover (a restarted process), not a failure
+    const rows = health.health.filter((h) => h.tenant_id === r.tenant_id
+      && !(silentS < 60 && (Array.isArray(h.reasons) ? h.reasons : [String(h.reasons)]).some((x: string) => String(x).startsWith('no heartbeat'))));
     const worst = rows.reduce((w, h) => Math.max(w, RANK[h.state] ?? 0), 0);
     const bad = rows.filter((h) => (RANK[h.state] ?? 0) === worst);
-    const silentS = (Date.now() - new Date(r.last_seen).getTime()) / 1000;   // payloads stopped arriving
     const rep = reported[r.guard_id] || {};   // the guard's own health, as sent in its newest payload
     guards[r.guard_id] = {
       guard_id: r.guard_id, tenant_id: r.tenant_id, region: region[r.tenant_id] || 'in',

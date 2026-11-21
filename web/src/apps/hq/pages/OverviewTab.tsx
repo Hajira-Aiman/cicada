@@ -3,7 +3,7 @@ import { useLiveStore } from '@/stores/liveStore';
 import { useUiStore } from '@/stores/uiStore';
 import { MetricChart } from '@/components/MetricChart';
 import { StatusBadge } from '@/components/StatusBadge';
-import { TimeText } from '@/components/TimeText';
+import { Ago } from '@/features/NodeSidebar';
 import { GuardInfo, Incident } from '@/types';
 
 const offlineGuard = (id: string, tenant: string, region: 'in' | 'eu'): GuardInfo => ({
@@ -33,7 +33,7 @@ export const OverviewTab: React.FC = () => {
     { label: 'SYSTEM 2', key: 'globex', data: system2 },
   ];
 
-  const overallHealthy = ![system1, system2].some((g) => g.state === 'Poor' || g.state === 'Offline');
+  const overallHealthy = ![system1, system2].filter((g) => new Date(g.last_seen).getFullYear() > 2000).some((g) => g.state === 'Poor' || g.state === 'Offline');
   const noiseCutPct = counters.raw_alerts > 0
     ? Math.round(((counters.raw_alerts - counters.incidents) / counters.raw_alerts) * 100)
     : 0;
@@ -150,40 +150,27 @@ export const OverviewTab: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Minimalist Live Gauges */}
-                <div className="grid grid-cols-2 gap-4 mt-4 pt-3 border-t border-white/5">
-                  <div>
-                    <div className="flex justify-between text-xs font-mono mb-1">
-                      <span className="text-slate-400">CPU Usage</span>
-                      <span className="text-white font-bold">{s.data.guard_cpu_pct}%</span>
+                {/* Live gauges: the shop machine's own numbers from telemetry */}
+                {(() => {
+                  const last = (n: string) => (metrics[`${s.key}:${n}`] || []).slice(-1)[0]?.avg;
+                  const cpu = last('cpu_pct'), mem = last('mem_pct'), lat = last('latency_ms');
+                  const bar = (v: number | undefined, color: string) => (
+                    <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div className={`h-full rounded-full ${color}`} style={{ width: `${Math.min(100, v ?? 0)}%` }} /></div>
+                  );
+                  return (
+                    <div className="grid grid-cols-3 gap-4 mt-4 pt-3 border-t border-white/5">
+                      <div><div className="flex justify-between text-xs font-mono mb-1"><span className="text-slate-400">CPU</span><span className="text-white font-bold">{cpu === undefined ? '—' : `${cpu.toFixed(0)}%`}</span></div>{bar(cpu, isPoor ? 'bg-rose-500' : 'bg-sky-500')}</div>
+                      <div><div className="flex justify-between text-xs font-mono mb-1"><span className="text-slate-400">Memory</span><span className="text-white font-bold">{mem === undefined ? '—' : `${mem.toFixed(0)}%`}</span></div>{bar(mem, 'bg-cyan-500')}</div>
+                      <div><div className="flex justify-between text-xs font-mono mb-1"><span className="text-slate-400">Latency</span><span className="text-white font-bold">{lat === undefined ? '—' : `${lat.toFixed(0)} ms`}</span></div>{bar(lat === undefined ? 0 : lat / 5, 'bg-emerald-500')}</div>
                     </div>
-                    <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${isPoor ? 'bg-rose-500' : 'bg-sky-500'}`}
-                        style={{ width: `${Math.min(100, s.data.guard_cpu_pct)}%` }}
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="flex justify-between text-xs font-mono mb-1">
-                      <span className="text-slate-400">Memory</span>
-                      <span className="text-white font-bold">{s.data.guard_mem_mb} MB</span>
-                    </div>
-                    <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                      <div
-                        className="h-full rounded-full bg-cyan-500"
-                        style={{ width: `${Math.min(100, (s.data.guard_mem_mb / 128) * 100)}%` }}
-                      />
-                    </div>
-                  </div>
-                </div>
+                  );
+                })()}
 
                 {/* Footer specs */}
                 <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 mt-4 pt-2 border-t border-white/5">
                   <span>Buffer: <strong className="text-slate-300">{s.data.buffer_depth}</strong></span>
-                  <span>Policy: <strong className="text-slate-300">{s.data.policy_hash}</strong></span>
-                  <span>Last Seen: <TimeText timestamp={s.data.last_seen} /></span>
+                  <span>Guard: <strong className="text-slate-300">{s.data.guard_version}</strong></span>
+                  <span>Last seen: <Ago iso={s.data.last_seen} /></span>
                 </div>
               </div>
             );

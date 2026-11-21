@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Fallback2D } from '@/three/Fallback2D';
 import { useLiveStore } from '@/stores/liveStore';
 import type { Machine } from '@/three/LaptopModel';
+import { NodeSidebar } from '@/features/NodeSidebar';
 
 const LaptopViewer = React.lazy(() => import('@/three/LaptopModel').then(m => ({ default: m.LaptopViewer })));
 
@@ -11,6 +12,7 @@ const RISK = { Excellent: 0.1, Good: 0.2, Fair: 0.55, Poor: 0.95, Offline: 0.2 }
 export const LiveMapTab: React.FC = () => {
   const guards = useLiveStore((s) => s.guards);
   const [viewMode, setViewMode] = useState<'2D' | '3D'>('2D');
+  const [selected, setSelected] = useState<string | null>(null);   // a guard id, 'hq', or nothing
 
   const real: Machine[] = Object.values(guards)
     .map((g) => ({
@@ -74,9 +76,10 @@ export const LiveMapTab: React.FC = () => {
           <Fallback2D height="100%" />
         ) : (
           <React.Suspense fallback={<Fallback2D height="100%" />}>
-            <LaptopViewer machines={machines} />
+            <LaptopViewer machines={machines} selected={selected} onSelect={setSelected} />
           </React.Suspense>
         )}
+        {viewMode === '3D' && selected && <NodeSidebar node={selected} onClose={() => setSelected(null)} />}
       </div>
     </div>
   );

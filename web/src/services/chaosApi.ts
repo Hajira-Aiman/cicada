@@ -16,12 +16,10 @@ export const SCENARIOS: ChaosScenario[] = [
   { id: 'cpu_spike', name: 'CPU Spike', description: 'Pushes the shop laptop to about 70% CPU (low priority, so the guard keeps sending)', category: 'attack', endpoint: '/scenarios/cpu_spike' },
   { id: 'latency', name: 'Latency Spike', description: 'Injects 240ms network latency window', category: 'reliability', endpoint: '/scenarios/latency' },
   { id: 'brute_force', name: 'Brute Force Attack', description: 'Emits 50 failed SSH logins in 2 seconds', category: 'attack', endpoint: '/scenarios/brute_force' },
-  { id: 'region_outage', name: 'India Region Pause', description: 'Pauses India Ingest (:8001); verifies guard local buffer', category: 'infrastructure', endpoint: '/api/regions/in/pause' },
   { id: 'replay_shuffle', name: 'Replay & Shuffle', description: 'Replays old sequence payload and sends out of order', category: 'reliability', endpoint: '/scenarios/replay_shuffle' },
   { id: 'tamper', name: 'Tamper Schema / HMAC', description: 'Mutates payload bytes to trigger cryptographic rejection', category: 'tamper', endpoint: '/scenarios/tamper' },
   { id: 'kill_chain', name: 'Full Kill Chain', description: 'Burst login -> privilege escalation -> CPU spike -> outbound burst', category: 'attack', endpoint: '/scenarios/kill_chain' },
   { id: 'backup_job', name: 'Periodic Backup Job', description: 'Known scheduled pattern (tests suppression without alerts)', category: 'reliability', endpoint: '/scenarios/backup_job' },
-  { id: 'restart_app', name: 'App Restart Crash', description: 'Generates service restart event and rapid recovery', category: 'infrastructure', endpoint: '/scenarios/restart_app' },
 ];
 
 const describeResult = (id: string, r: any): string => {
