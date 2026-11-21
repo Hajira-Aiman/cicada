@@ -42,3 +42,4 @@ certs/*.key
 
 # guard log-tailer read positions
 *.log.offset
+.vite/
