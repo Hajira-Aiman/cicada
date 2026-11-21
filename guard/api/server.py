@@ -24,7 +24,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from contracts.request_auth import PRIVATE_ORIGIN_REGEX
+from guard.action_loop import ActionQueue, approve_request, pull_actions_forever, reject_request
 from guard.config import GuardConfig
+from guard.executor import RemediationExecutor
+from guard.hq_client import hq_call as _hq_call
+from guard.shop_ai import ShopAIAssistant
 from guard.thin_slice import GuardThinSlice
 
 
@@ -48,7 +53,7 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
 
     api.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origin_regex=PRIVATE_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -61,6 +66,12 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         guard_cpu = round(proc.cpu_percent(interval=None), 2)
         guard_mem = round(proc.memory_info().rss / (1024 * 1024), 2)
         last_seq, _ = _guard.ledger.get_last_seq_and_hash()
+        health = {}
+        try:   # the collector runs as another process: its real counters are in the newest payload it sent
+            rows = _guard.ledger.get_recent_rows(limit=1)
+            health = (json.loads(rows[0]["body"]).get("health") or {}) if rows else {}
+        except Exception:
+            pass
         return {
             "guard_id": _guard.config.GUARD_ID,
             "tenant_id": _guard.config.TENANT_ID,
@@ -69,10 +80,10 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
             "buffer_depth": _guard.outbox.get_buffer_depth(),
             "retention_countdown_seconds": _guard.raw_store.get_retention_countdown(),
             "policy_version": _guard.config.POLICY_VERSION,
-            "canaries_planted": _guard.scrubber.canaries_planted,
-            "secrets_redacted": _guard.scrubber.secrets_redacted,
-            "guard_cpu_pct": guard_cpu,
-            "guard_mem_mb": guard_mem,
+            "canaries_planted": health.get("canaries_planted", _guard.scrubber.canaries_planted),
+            "secrets_redacted": health.get("secrets_redacted", _guard.scrubber.secrets_redacted),
+            "guard_cpu_pct": health.get("guard_cpu_pct", guard_cpu),
+            "guard_mem_mb": health.get("guard_mem_mb", guard_mem),
             "last_seq": last_seq,
         }
 
@@ -92,6 +103,17 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
             "count": len(logs),
             "logs": logs,
         }
+
+    class AskRequest(BaseModel):
+        question: str = Field(..., max_length=500)
+
+    @api.post("/api/ask")
+    def ask_shop_ai(req: AskRequest, request: Request):
+        """Shop AI: answers from this shop's raw logs (local Lemonade model). Raw data never leaves this machine."""
+        client_ip = request.client.host if request.client else "127.0.0.1"
+        if client_ip not in ("127.0.0.1", "::1", "localhost", "testclient"):
+            raise HTTPException(status_code=403, detail="The shop AI reads raw logs and is only reachable on the shop host")
+        return {"answer": ShopAIAssistant(raw_db_path=_guard.config.RAW_DB_PATH, guard_db_path=_guard.config.GUARD_DB_PATH).chat(req.question)}
 
     @api.get("/api/egress")
     def get_egress():
@@ -132,28 +154,63 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    @api.get("/api/reveal-requests")
-    def list_reveal_requests(status: Optional[str] = None):
-        """Returns pending and decided reveal requests, syncing from Head Office."""
-        hq_ip = os.getenv("HQ_IP") or "172.17.1.76"
+    hq = os.getenv("HQ_URL", "http://localhost:8000")
+
+    def hq_call(method, path, params=None, json_body=None):
+        """Every guard -> head-office call is signed with this guard's secret (see contracts/request_auth.py)."""
+        return _hq_call(_guard.config, hq, method, path, params, json_body)
+
+    def pull_reveals():
+        """Head office never reaches into the shop: the guard asks for pending reveal requests for its own tenant."""
+        import time
+        while True:
+            try:
+                rows = hq_call("GET", "/reveal-requests", params={"status": "pending"}).json().get("reveal_requests", [])
+                known = {r["id"] for r in _guard.pseudonym_mgr.list_reveal_requests()}
+                for r in rows:
+                    if r.get("tenant_id") == _guard.config.TENANT_ID and r["request_id"] not in known:
+                        _guard.pseudonym_mgr.create_reveal_request(pseudonym=r["pseudonym"], reason=r["reason"], req_id=r["request_id"])
+            except Exception:
+                pass
+            time.sleep(3)
+
+    def push_decision(req_id, status, reason):
+        """Only the decision goes back to head office, never the revealed value."""
         try:
-            import httpx
-            with httpx.Client(timeout=1.5) as client:
-                resp = client.get(f"http://{hq_ip}:8000/api/reveal-requests")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    local_reqs = {r["id"]: r for r in _guard.pseudonym_mgr.list_reveal_requests()}
-                    for hr in data.get("reveal_requests", []):
-                        r_id = hr.get("request_id")
-                        if r_id and r_id not in local_reqs:
-                            _guard.pseudonym_mgr.create_reveal_request(
-                                pseudonym=hr.get("pseudonym", ""),
-                                reason=hr.get("reason", "Requested by Head Office"),
-                                req_id=r_id,
-                            )
+            hq_call("POST", f"/reveal-requests/{req_id}/decision", json_body={"status": status, "decision_reason": reason})
         except Exception:
             pass
 
+    executor = RemediationExecutor(_guard)
+
+    actions = ActionQueue()
+
+    def pull_actions():
+        """Intents approved at head office are pulled and verified, then wait here for the shop manager (guard/action_loop.py)."""
+        pull_actions_forever(_guard, actions, hq_call)
+
+    @api.get("/api/action-requests")
+    def list_action_requests():
+        return {"requests": actions.listing()}
+
+    @api.post("/api/action-requests/{intent_id}/approve")
+    def approve_action_request(intent_id: str):
+        if not approve_request(_guard, executor, actions, hq_call, intent_id):
+            raise HTTPException(status_code=409, detail="Request is not pending (already decided, running or expired)")
+        return {"status": "running"}
+
+    @api.post("/api/action-requests/{intent_id}/reject")
+    def reject_action_request(intent_id: str, body: Optional[DecisionRequest] = None):
+        if not reject_request(_guard, actions, hq_call, intent_id, (body.decision_reason if body else None) or "Declined by the shop manager"):
+            raise HTTPException(status_code=409, detail="Request is not pending (already decided, running or expired)")
+        return {"status": "rejected"}
+
+    api.state.pull_actions = pull_actions
+    api.state.pull_reveals = pull_reveals   # started only when run as a program (see __main__), never on import or in tests
+
+    @api.get("/api/reveal-requests")
+    def list_reveal_requests(status: Optional[str] = None):
+        """Returns pending and decided reveal requests."""
         reqs = _guard.pseudonym_mgr.list_reveal_requests(status=status)
         return {"count": len(reqs), "requests": reqs}
 
@@ -171,48 +228,22 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         """
         Approves a reveal request locally.
         Resolves the pseudonym from local reveal.db and returns the real identifier.
-        Informs Head Office that the request was approved (without egressing the real value).
         """
         reason = body.decision_reason if body else "Approved by shop operator"
         res = _guard.pseudonym_mgr.decide_reveal_request(req_id=req_id, approved=True, reason=reason)
         if not res:
             raise HTTPException(status_code=404, detail=f"Reveal request '{req_id}' not found")
-
-        # Notify Head Office
-        hq_ip = os.getenv("HQ_IP") or "172.17.1.76"
-        try:
-            import httpx
-            with httpx.Client(timeout=2.0) as client:
-                client.post(
-                    f"http://{hq_ip}:8000/api/reveal-requests/{req_id}/decision",
-                    json={"status": "approved", "decision_reason": reason},
-                )
-        except Exception:
-            pass
+        push_decision(req_id, "approved", reason)
         return res
 
     @api.post("/api/reveal-requests/{req_id}/reject")
     def reject_reveal_request(req_id: str, body: Optional[DecisionRequest] = None):
-        """
-        Rejects a reveal request locally.
-        Informs Head Office of the rejection.
-        """
+        """Rejects a reveal request locally."""
         reason = body.decision_reason if body else "Rejected by shop operator"
         res = _guard.pseudonym_mgr.decide_reveal_request(req_id=req_id, approved=False, reason=reason)
         if not res:
             raise HTTPException(status_code=404, detail=f"Reveal request '{req_id}' not found")
-
-        # Notify Head Office
-        hq_ip = os.getenv("HQ_IP") or "172.17.1.76"
-        try:
-            import httpx
-            with httpx.Client(timeout=2.0) as client:
-                client.post(
-                    f"http://{hq_ip}:8000/api/reveal-requests/{req_id}/decision",
-                    json={"status": "rejected", "decision_reason": reason},
-                )
-        except Exception:
-            pass
+        push_decision(req_id, "rejected", reason)
         return res
 
     @api.get("/api/reveal/{pseudonym}")
@@ -256,5 +287,8 @@ app = create_guard_api_app()
 
 if __name__ == "__main__":
     import uvicorn
+    import threading
+    threading.Thread(target=app.state.pull_reveals, daemon=True).start()
+    threading.Thread(target=app.state.pull_actions, daemon=True).start()
     port = int(os.getenv("GUARD_PORT", "9000"))
     uvicorn.run(app, host="127.0.0.1", port=port)

@@ -36,6 +36,22 @@ HEALTH_RANK = {"Excellent": 0, "Good": 1, "Fair": 2, "Poor": 3}
 iso = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# who depends on whom: a problem in the key lights up everything listed (transitively) as impacted
+DEPENDENTS = {"host": ["shop-api", "db"], "db": ["shop-api", "checkout"], "shop-api": ["login", "checkout"]}
+
+
+def damage_map(affected, dependents=DEPENDENTS):
+    """T9 damage map: affected components are red, their dependents amber, everything else green."""
+    hit, todo = set(), list(affected)
+    while todo:
+        for d in dependents.get(todo.pop(), []):
+            if d not in hit and d not in affected:
+                hit.add(d); todo.append(d)
+    nodes = {c for e in TOPOLOGY for c in e}
+    return {"nodes": [{"id": c, "state": "affected" if c in affected else "impacted" if c in hit else "ok"} for c in sorted(nodes)],
+            "edges": [{"from": a, "to": b} for a, b in TOPOLOGY]}
+
+
 def related(a, b, edges=TOPOLOGY):
     """True if components a and b are connected in the topology (or equal)."""
     if a == b:
@@ -73,6 +89,7 @@ class Inc:
         self.proc = None     # pseudonym of the suspicious new process, if the guard reported one
         self.sent = None     # signature of the last emitted version
         self.closed = False
+        self.narrative, self.narrated = None, None   # text, and the (title, severity) it was written for
 
     def components(self):
         return {COMPONENT.get(n, "host") for (_s, n) in self.sig}
@@ -83,7 +100,8 @@ class Inc:
         return max((s["sev"] for s in self.sig.values()), key=SEV_RANK.get, default="low")
 
     def weights(self):
-        w = {k: (abs(s["z"]) if s["z"] is not None else min(s["count"] / EVENT_BASELINE, EVENT_WEIGHT_CAP))
+        # both kinds capped at the same value: an uncapped z of a few hundred (tiny baseline spread) hid every other signal
+        w = {k: min(abs(s["z"]) if s["z"] is not None else s["count"] / EVENT_BASELINE, EVENT_WEIGHT_CAP)
              for k, s in self.sig.items()}
         tot = sum(w.values()) or 1.0
         return {k: 100.0 * v / tot for k, v in w.items()}
@@ -169,7 +187,8 @@ class Inc:
         sigs = [SignalEvidence(evidence_id=f"ev-{i}", name=n, value=s["value"], baseline=s["baseline"], z=s["z"],
                                contribution_pct=round(contrib[(src, n)], 1))
                 for i, ((src, n), s) in enumerate(order, 1)]
-        path = [f"{LABEL.get(n, n)} at {iso(s['first'])[11:19]}" + (f" (x{s['repeats']})" if s["repeats"] > 1 else "")
+        # trailing Z = UTC; the incident card re-renders these in the viewer's chosen time zone
+        path = [f"{LABEL.get(n, n)} at {iso(s['first'])[11:19]}Z" + (f" (x{s['repeats']})" if s["repeats"] > 1 else "")
                 for (_src, n), s in order]
         path += [f"rule matched: {r}" for r in sorted(self.rules)]
         if self.river:
@@ -182,7 +201,7 @@ class Inc:
                         signals=sigs, reasoning_path=path, counterfactual=self.counterfactual(),
                         recommendation=self.recommendation(),
                         changes_before=[f"started {d:.0f} s after {lab}" for d, lab in self.changes],
-                        repeat_count=sum(s["repeats"] for s in self.sig.values()))
+                        repeat_count=sum(s["repeats"] for s in self.sig.values()), narrative=self.narrative)
 
     def signature(self):
         return (self.title(), self.severity(), tuple(sorted(self.sig)), round(self.confidence()[0], 2),

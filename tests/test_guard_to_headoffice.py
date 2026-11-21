@@ -9,7 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 from fastapi import FastAPI
 from hq.ingest.main import create_ingest_app
-from hq.db import get_sqlite_conn, init_all_databases
+from hq.db import get_sqlite_conn, init_all_databases, register_guard, truncate_all_data
 from guard.thin_slice import GuardThinSlice
 from guard.config import GuardConfig
 
@@ -22,6 +22,9 @@ def _health_ok():
 @pytest.fixture(autouse=True)
 def setup_dbs():
     init_all_databases()
+    truncate_all_data()
+    register_guard("guard-acme-01", "acme", "sec-acme-super-secret-key-2026")   # truncate clears the registry
+    register_guard("guard-globex-01", "globex", "sec-globex-super-secret-key-2026")
 
 
 def test_guard_to_headoffice_ingest_in():

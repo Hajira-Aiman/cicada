@@ -15,6 +15,8 @@ Provides endpoints for:
 """
 
 import os
+import re
+import sys
 import time
 import uuid
 import threading
@@ -23,11 +25,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from contracts.request_auth import PRIVATE_ORIGIN_REGEX
+
 app = FastAPI(title="Airlock Chaos Agent", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=PRIVATE_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -35,7 +39,227 @@ app.add_middleware(
 
 # Active chaos state registry
 _active_scenarios: Dict[str, Dict[str, Any]] = {}
+_history: List[Dict[str, Any]] = []   # every scenario started since the agent came up (the dashboard draws these as markers)
 _lock = threading.Lock()
+
+
+# --- Real Chaos Effect Implementations ---
+
+# request-supplied names (service, interface) reach subprocess argv: allow plain identifiers only
+SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+
+def _run_cpu_burner(duration_s: float, cores: Optional[int] = None, duty: float = 1.0):
+    """Loads 8 cores at 100% continuous busy loop (no time.sleep).
+    On an 8-core / 16-thread CPU, 8 pure worker processes peg Task Manager cleanly to ~70-75% CPU,
+    leaving 8 full logical threads completely free for Windows, Wi-Fi networking, and Guard.
+    """
+    import subprocess
+    import sys
+    num_workers = cores if cores is not None else 8
+    code = f"import time; e = time.time() + {duration_s}\nwhile time.time() < e: pass\n"
+    flags = getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0x20)
+    kids = [subprocess.Popen([sys.executable, "-c", code], creationflags=flags) for _ in range(num_workers)]
+    for k in kids:
+        k.wait()
+
+
+def _run_exfil(duration_s: float, rate_kbps: int = 4000):
+    """Real outbound burst: UDP datagrams to a TEST-NET address (RFC 5737, never routed). They still leave through
+    the network card, so the guard's net_out_kbps (psutil NIC counters) really spikes. Nothing is delivered anywhere."""
+    import socket
+    end_time = time.time() + duration_s
+    chunk = b"x" * 1200
+    per_s = max(1, int(rate_kbps * 1000 / 8 / len(chunk)))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        while time.time() < end_time:
+            for _ in range(per_s // 10):
+                try:
+                    sock.sendto(chunk, ("192.0.2.1", 9))
+                except OSError:
+                    pass
+            time.sleep(0.1)
+
+
+# the attack must hit the shop's own login: the guard reads that log, HQ never sees raw logins
+SHOP_API_URL = os.getenv("SHOP_API_URL", "http://localhost:7000")
+SHOP_LOGIN_URL = os.getenv("SHOP_LOGIN_URL", f"{SHOP_API_URL}/auth/login")
+
+
+def _run_brute_force(duration_s: float, target_url: str):
+    """Sends rapid burst of invalid authentication attempts."""
+    import httpx
+    end_time = time.time() + duration_s
+    with httpx.Client(timeout=2.0) as client:
+        while time.time() < end_time:
+            try:
+                client.post(
+                    target_url,
+                    json={"username": f"attacker_{uuid.uuid4().hex[:6]}", "password": "wrong_password_123"},
+                )
+            except Exception:
+                pass
+            time.sleep(0.1)
+
+
+def _run_backup_job(duration_s: float):
+    """Periodic noisy backup job: a 12 s burst on half the cores (a real spike on the host's CPU, one thread was invisible on a
+    many-core laptop), then idle until the next minute: the steady 60 s interval head office learns as a scheduled job."""
+    end_time = time.time() + duration_s
+    while time.time() < end_time:
+        _run_cpu_burner(min(12.0, end_time - time.time()), cores=max(2, (os.cpu_count() or 4) // 2))
+        idle_until = min(time.time() + 48.0, end_time)
+        remaining = idle_until - time.time()
+        if remaining > 0:
+            time.sleep(remaining)
+
+
+def _run_kill_chain(duration_s: float):
+    """Multi-stage kill chain progression: Recon -> Brute Force -> Resource Exhaustion -> Outbound socket."""
+    import httpx
+    # the guard samples about every 4 s and a flag needs 3 windows, so every stage must last >= 15 s
+    step_duration = max(duration_s / 4.0, 15.0)
+    # Stage 1: recon
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            client.get("http://localhost:8000/api/health")
+    except Exception:
+        pass
+    time.sleep(1)
+
+    # Stage 2: login failure burst against the shop, then a quiet gap so the guard closes the burst
+    _run_brute_force(10, SHOP_LOGIN_URL)
+    time.sleep(6)
+    # a success right after the failures = login_after_failures
+    try:
+        with httpx.Client(timeout=2.0) as client:
+            client.post(SHOP_LOGIN_URL, json={"username": "admin", "password": "securepass2026"})
+    except Exception:
+        pass
+
+    # Stage 3: CPU on every core; Stage 4: outbound burst on top of it (miner talking to its pool)
+    threading.Thread(target=lambda: (time.sleep(step_duration), _run_exfil(step_duration, 30000)), daemon=True).start()
+    _run_cpu_burner(step_duration * 2, cores=max(1, (os.cpu_count() or 4) - 2), duty=0.65)
+
+
+def _run_region_outage(region: str, duration_s: float):
+    """Real region outage. On the shop laptop (HQ_URL set) the chaos agent asks head office, signed with the guard's key, to pause
+    and later resume the region: writing to this laptop's own database would pause nothing. Without HQ_URL it is the same machine."""
+    try:
+        if os.getenv("HQ_URL"):
+            from guard.config import config
+            from guard.hq_client import hq_call
+            hq_call(config, os.environ["HQ_URL"], "POST", f"/api/regions/{region}/pause")
+            try:
+                time.sleep(duration_s)
+            finally:
+                hq_call(config, os.environ["HQ_URL"], "POST", f"/api/regions/{region}/unpause")
+        else:
+            from hq.db import set_region_paused
+            set_region_paused(region, True)
+            time.sleep(duration_s)
+            set_region_paused(region, False)
+    except Exception:
+        pass
+
+
+def _guard_ledger_bodies(limit: int = 5) -> List[bytes]:
+    """The most recent payload bodies this shop's guard sent (exact bytes it signed), newest first."""
+    import sqlite3
+    from guard.config import config
+    try:
+        with sqlite3.connect(config.GUARD_DB_PATH) as conn:
+            return [r[0].encode("utf-8") for r in conn.execute("SELECT body FROM ledger ORDER BY seq DESC LIMIT ?", (limit,))]
+    except sqlite3.Error:
+        return []
+
+
+def _post_ingest(body: bytes, signed_body: Optional[bytes] = None) -> int:
+    """POST a body to this shop's ingest endpoint; the signature covers signed_body (default: the body itself)."""
+    import httpx
+    from datetime import datetime, timezone
+    from guard.config import config
+    from guard.signer import create_auth_headers
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    headers = create_auth_headers(config.GUARD_ID, signed_body if signed_body is not None else body, ts, config.GUARD_SECRET_KEY)
+    return httpx.post(config.REGION_URL, content=body, headers=headers, timeout=5, verify=config.TLS_VERIFY).status_code
+
+
+def _run_tamper() -> Dict[str, Any]:
+    """Two attacks on a copy of a real payload. Expect 401 (a byte flipped after signing) and 422 (a valid signature over
+    a body with a field the allow-list does not know). Nothing is stored; head office raises tamper alerts."""
+    import json
+    bodies = _guard_ledger_bodies(1)
+    base = bodies[0] if bodies else b'{"schema":"airlock.v1"}'
+    flipped = bytearray(base)
+    flipped[len(flipped) // 2] ^= 0x01
+    extra = json.loads(base)
+    extra["raw_log"] = "password=hunter2"
+    return {"byte_flipped": _post_ingest(bytes(flipped), signed_body=base), "extra_field": _post_ingest(json.dumps(extra).encode())}
+
+
+def _run_replay_shuffle() -> Dict[str, Any]:
+    """Re-sends the last payloads, shuffled, with fresh signatures. Head office already has them: expect 200 'duplicate' each
+    (counted on the reconciliation panel, nothing stored twice)."""
+    import random
+    bodies = _guard_ledger_bodies(5)
+    random.shuffle(bodies)
+    return {"replayed": len(bodies), "status_codes": [_post_ingest(b) for b in bodies]}
+
+
+def _run_shop_latency(duration_s: float, delay_ms: int) -> None:
+    """Windows/any OS: the shop API itself waits delay_ms per request, so the guard's probe measures it for real."""
+    import httpx
+    try:
+        httpx.post(f"{SHOP_API_URL}/chaos/latency", json={"delay_ms": delay_ms, "duration_s": int(duration_s)}, timeout=3)
+    except httpx.HTTPError:
+        pass
+
+
+def _restart_shop_api_by_pid() -> None:
+    """Windows/any OS: stop the running shop-api (pid from its /health) and start it again; the guard sees a new pid."""
+    import subprocess
+    import sys
+    import httpx
+    import psutil
+    try:
+        pid = int(httpx.get(f"{SHOP_API_URL}/health", timeout=2).json()["pid"])
+        psutil.Process(pid).terminate()
+    except Exception:
+        return
+    time.sleep(1.0)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    subprocess.Popen([sys.executable, os.path.join("shop-api", "main.py")], cwd=root, creationflags=flags,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _run_latency_netem(duration_s: float, delay_ms: int = 450, loss_pct: int = 3, iface: str = "lo"):
+    """Applies kernel traffic control delay and packet loss via tc netem on interface."""
+    import subprocess
+    if not SAFE_NAME.match(iface):
+        return
+    add = ["sudo", "/usr/sbin/tc", "qdisc", "add", "dev", iface, "root", "netem", "delay", f"{int(delay_ms)}ms", "loss", f"{int(loss_pct)}%"]
+    delete = ["sudo", "/usr/sbin/tc", "qdisc", "del", "dev", iface, "root"]
+    quiet = dict(check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        subprocess.run(add, **quiet)
+        time.sleep(duration_s)
+    finally:
+        subprocess.run(delete, **quiet)
+
+
+def _run_restart_app(target: Optional[str] = None):
+    """Restarts application service via systemctl or docker."""
+    import subprocess
+    app_name = target or "shop-api"
+    if not SAFE_NAME.match(app_name):
+        return
+    quiet = dict(check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if subprocess.run(["systemctl", "restart", app_name], **quiet).returncode != 0:
+            subprocess.run(["docker", "restart", app_name], **quiet)
+    except OSError:
+        pass  # neither systemctl nor docker on this host (e.g. Windows)
 
 
 class ScenarioRequest(BaseModel):
@@ -49,70 +273,6 @@ class TriggerRequest(BaseModel):
     duration_s: int = 15
     target: Optional[str] = None
     params: Optional[Dict[str, Any]] = None
-
-
-def _exec_action(name: str, duration_s: int):
-    """Executes realistic chaos actions against the local shop environment."""
-    import sys
-    if "pytest" in sys.modules:
-        return
-    shop_url = os.getenv("SHOP_API_URL", "http://127.0.0.1:7000")
-    try:
-        if name in ("brute_force", "login_burst"):
-            import httpx
-            with httpx.Client(base_url=shop_url, timeout=2.0) as client:
-                for i in range(50):
-                    try:
-                        client.post("/auth/login", json={"username": f"user_{i}", "password": f"wrongpass_{i}"})
-                    except Exception:
-                        pass
-                    time.sleep(0.02)
-        elif name == "kill_chain":
-            import httpx
-            with httpx.Client(base_url=shop_url, timeout=2.0) as client:
-                # 1. Burst of 50 failed logins
-                for i in range(50):
-                    try:
-                        client.post("/auth/login", json={"username": "admin", "password": f"wrongpass_{i}"})
-                    except Exception:
-                        pass
-                    time.sleep(0.02)
-                time.sleep(4.5)
-                # 2. Successful login
-                try:
-                    client.post("/auth/login", json={"username": "admin", "password": "correct_password_2026"})
-                except Exception:
-                    pass
-                time.sleep(3.0)
-                # 3. Simulate high CPU utilization and outbound traffic (cryptomining simulation)
-                import socket
-                end_time = time.time() + max(duration_s, 25)
-                def _burn():
-                    while time.time() < end_time:
-                        _ = [x * x for x in range(2000)]
-                def _net():
-                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                    chunk = b"X" * 1400
-                    while time.time() < end_time:
-                        try:
-                            s.sendto(chunk, ("127.0.0.1", 9999))
-                        except Exception:
-                            pass
-                        time.sleep(0.001)
-                burners = [threading.Thread(target=_burn, daemon=True) for _ in range(os.cpu_count() or 4)]
-                net_burners = [threading.Thread(target=_net, daemon=True) for _ in range(4)]
-                for b in burners + net_burners:
-                    b.start()
-        elif name == "cpu_spike":
-            end_time = time.time() + duration_s
-            def _burn():
-                while time.time() < end_time:
-                    _ = [x * x for x in range(2000)]
-            burners = [threading.Thread(target=_burn, daemon=True) for _ in range(os.cpu_count() or 4)]
-            for b in burners:
-                b.start()
-    except Exception:
-        pass
 
 
 def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -130,8 +290,55 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
             "params": params or {},
         }
         _active_scenarios[name] = entry
-        threading.Thread(target=_exec_action, args=(name, duration_s), daemon=True).start()
-        return entry
+        _history.append({"id": scn_id, "name": name, "started_at": now, "duration_s": duration_s, "target": entry["target"]})
+        del _history[:-200]
+
+    # Trigger real effect in background worker thread
+    p = params or {}
+    if name == "cpu_spike":
+        threading.Thread(target=_run_cpu_burner, args=(duration_s, 8), daemon=True).start()
+    elif name in ("brute_force", "login_burst"):
+        target_url = p.get("url", SHOP_LOGIN_URL)
+        threading.Thread(target=_run_brute_force, args=(duration_s, target_url), daemon=True).start()
+    elif name == "backup_job":
+        threading.Thread(target=_run_backup_job, args=(duration_s,), daemon=True).start()
+    elif name == "kill_chain":
+        threading.Thread(target=_run_kill_chain, args=(duration_s,), daemon=True).start()
+    elif name in ("region_outage", "outage"):
+        reg = target or p.get("region", "in")
+        threading.Thread(target=_run_region_outage, args=(reg, duration_s), daemon=True).start()
+    elif name == "latency":
+        delay = int(p.get("delay_ms", 450))
+        loss = int(p.get("loss_pct", 3))
+        iface = str(p.get("interface", "lo"))
+        if sys.platform.startswith("linux"):
+            threading.Thread(target=_run_latency_netem, args=(duration_s, delay, loss, iface), daemon=True).start()
+        else:
+            threading.Thread(target=_run_shop_latency, args=(duration_s, delay), daemon=True).start()
+    elif name == "restart_app":
+        worker = _run_restart_app if sys.platform.startswith("linux") else _restart_shop_api_by_pid
+        threading.Thread(target=worker, args=(target,) if worker is _run_restart_app else (), daemon=True).start()
+    elif name in ("tamper", "replay_shuffle"):
+        run = _run_tamper if name == "tamper" else _run_replay_shuffle
+
+        def record():
+            try:
+                entry["result"] = run()
+            except Exception as exc:   # ingest unreachable etc.
+                entry["result"] = {"error": str(exc)}
+        threading.Thread(target=record, daemon=True).start()
+    elif name in ("leak", "try_to_leak"):
+        leak_msg = p.get("leak_text", "AKIACANARY99999999SECRET")
+
+        def do_leak():
+            try:
+                import httpx
+                httpx.post(f"{SHOP_API_URL}/chaos/inject-log", json={"text": leak_msg}, timeout=3.0)
+            except Exception as exc:
+                entry["result"] = {"error": str(exc)}
+        threading.Thread(target=do_leak, daemon=True).start()
+
+    return entry
 
 
 def _prune_expired():
@@ -166,6 +373,12 @@ def list_scenarios():
     }
 
 
+@app.get("/chaos/history")
+def get_history():
+    with _lock:
+        return {"history": list(_history)}
+
+
 @app.get("/chaos/active")
 def get_active_scenarios():
     _prune_expired()
@@ -177,6 +390,14 @@ def get_active_scenarios():
 def reset_all_chaos():
     with _lock:
         _active_scenarios.clear()
+    if os.getenv("HQ_URL"):   # a paused region must never stay paused
+        from guard.config import config
+        from guard.hq_client import hq_call
+        for region in ("in", "eu"):
+            try:
+                hq_call(config, os.environ["HQ_URL"], "POST", f"/api/regions/{region}/unpause")
+            except Exception:
+                pass
     return {"status": "ok", "message": "All chaos scenarios reset"}
 
 

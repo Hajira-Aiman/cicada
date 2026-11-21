@@ -62,6 +62,29 @@ CREATE TABLE IF NOT EXISTS reveal_requests (
     decision_reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS action_intents (
+    intent_id VARCHAR(64) PRIMARY KEY,
+    incident_id VARCHAR(64),
+    tenant_id VARCHAR(64) NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    target VARCHAR(128) NOT NULL,
+    risk VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'proposed',
+    details JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    approved_by VARCHAR(128),
+    expires_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE TABLE IF NOT EXISTS action_audit (
+    event_id VARCHAR(64) PRIMARY KEY,
+    intent_id VARCHAR(64),
+    actor VARCHAR(128) NOT NULL,
+    step VARCHAR(64) NOT NULL,
+    details JSONB,
+    at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 INSERT INTO region_states (region, is_paused) VALUES ('in', FALSE), ('eu', FALSE)
 ON CONFLICT (region) DO NOTHING;
 
@@ -186,7 +209,21 @@ CREATE TABLE IF NOT EXISTS feedback (
     alert_id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL,
     user_id VARCHAR(64) NOT NULL,
+    metric VARCHAR(64),
+    source VARCHAR(64),
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS aiops_damage_map (tenant_id text PRIMARY KEY, body jsonb, updated_at timestamptz);
+
+CREATE TABLE IF NOT EXISTS aiops_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    metric VARCHAR(64) NOT NULL,
+    mean DOUBLE PRECISION NOT NULL,
+    std DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS guard_reconciliation (
@@ -222,6 +259,10 @@ CREATE TABLE IF NOT EXISTS aiops_counters (
     updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
+
+CREATE INDEX IF NOT EXISTS idx_payloads_guard_seq ON payloads(guard_id, seq);
+CREATE INDEX IF NOT EXISTS idx_metrics_payload ON metrics(payload_id);
+CREATE INDEX IF NOT EXISTS idx_events_payload ON events(payload_id);
 
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
@@ -320,7 +361,7 @@ CREATE POLICY tenant_isolation_aiops_counters ON aiops_counters FOR ALL USING (
 GRANT CONNECT ON DATABASE airlock_in TO aiops_worker;
 GRANT USAGE ON SCHEMA public TO aiops_worker;
 GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
-GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT ALL PRIVILEGES ON aiops_baselines, aiops_damage_map, health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;
 
 -- Database 3: airlock_eu (Europe Region)
@@ -411,7 +452,21 @@ CREATE TABLE IF NOT EXISTS feedback (
     alert_id VARCHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(64) NOT NULL,
     user_id VARCHAR(64) NOT NULL,
+    metric VARCHAR(64),
+    source VARCHAR(64),
     at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS aiops_damage_map (tenant_id text PRIMARY KEY, body jsonb, updated_at timestamptz);
+
+CREATE TABLE IF NOT EXISTS aiops_baselines (
+    id BIGSERIAL PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    source VARCHAR(64) NOT NULL,
+    metric VARCHAR(64) NOT NULL,
+    mean DOUBLE PRECISION NOT NULL,
+    std DOUBLE PRECISION NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS guard_reconciliation (
@@ -447,6 +502,10 @@ CREATE TABLE IF NOT EXISTS aiops_counters (
     updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 GRANT ALL PRIVILEGES ON aiops_counters TO aiops_worker;
+
+CREATE INDEX IF NOT EXISTS idx_payloads_guard_seq ON payloads(guard_id, seq);
+CREATE INDEX IF NOT EXISTS idx_metrics_payload ON metrics(payload_id);
+CREATE INDEX IF NOT EXISTS idx_events_payload ON events(payload_id);
 
 -- Row-Level Security on tenant_id
 ALTER TABLE payloads ENABLE ROW LEVEL SECURITY;
@@ -545,5 +604,5 @@ CREATE POLICY tenant_isolation_aiops_counters ON aiops_counters FOR ALL USING (
 GRANT CONNECT ON DATABASE airlock_eu TO aiops_worker;
 GRANT USAGE ON SCHEMA public TO aiops_worker;
 GRANT SELECT ON payloads, metrics, events, receipts TO aiops_worker;
-GRANT ALL PRIVILEGES ON health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
+GRANT ALL PRIVILEGES ON aiops_baselines, aiops_damage_map, health_history, health_current, incidents, aiops_alerts, aiops_counters, tenant_thresholds, feedback, guard_reconciliation TO aiops_worker;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aiops_worker;

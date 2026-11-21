@@ -145,15 +145,15 @@ contribution % and the confidence formula. Write incidents in the contract shape
 - **Done when:** the Backup job button alerts 3 times and then is labelled a scheduled job; Restart app followed by latency shows the change line.
 
 #### T9. Feedback + damage map · PRD #24, §Differentiators
-- [ ] 👎 on an alert raises that signal's flag level from 3 to 3.5 for 30 min, logged with who and when.
-- [ ] Small topology map per tenant, so the damage map lights up affected parts (website, login, checkout).
+- [x] 👎 on an alert raises that signal's flag level from 3 to 3.5 for 30 min, logged with who and when.
+- [x] Small topology map per tenant, so the damage map lights up affected parts (website, login, checkout).
 - **Done when:** a 👎 stops repeats of that alert, and a database slowdown lights its dependents.
 
 #### T10. Head-office AI + narratives · PRD #21, §AI assistants
-- [ ] Ollama via the OpenAI Python client.
-- [ ] Input: the incident JSON + a 10-minute metric summary for the **logged-in tenant only**.
-- [ ] Rules: answer only from evidence and cite evidence IDs. For anything else, say "I don't have that, raw data stays in the customer's environment."
-- [ ] Pre-write the narrative when an incident opens.
+- [x] Ollama via the OpenAI Python client.
+- [x] Input: the incident JSON + a 10-minute metric summary for the **logged-in tenant only**.
+- [x] Rules: answer only from evidence and cite evidence IDs. For anything else, say "I don't have that, raw data stays in the customer's environment."
+- [x] Pre-write the narrative when an incident opens.
 - **Done when:** asked "What password did the attacker use?", it refuses with that reason. Asked "Why is Shop A red?", it answers with evidence tags.
 
 ```text

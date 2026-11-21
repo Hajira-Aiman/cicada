@@ -6,31 +6,50 @@ role-based tenant separation (engineer vs customer),
 and database-enforced Row-Level Security (RLS).
 """
 
+import hashlib
+import hmac
 import json
 import os
+import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from contracts.request_auth import PRIVATE_ORIGIN_REGEX, request_signature
 from hq.api.broadcaster import broadcaster
+from hq.ingest.service import parse_iso8601_z
 from hq.db import (
     authenticate_user,
     compare_guard_checkpoint,
     compute_guard_checkpoint,
+    count_recent_intents,
+    create_action_intent,
     create_reveal_request,
     execute_query,
+    get_action_audit_logs,
+    get_action_intent,
     get_tenant_assigned_region,
+    get_damage_map,
+    get_leak_badge_count,
+    list_action_intents,
+    get_tenant_baselines,
     get_tenant_counters,
     init_all_databases,
+    is_postgres_available,
     is_region_paused,
+    list_pending_action_intents,
     list_reveal_requests,
+    log_action_audit,
     log_audit_event,
+    lookup_guard,
     record_feedback,
     set_region_paused,
+    update_action_intent_status,
     update_reveal_request_status,
     verify_session_token,
 )
@@ -41,7 +60,7 @@ app = FastAPI(title="Airlock Head-Office API", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origin_regex=PRIVATE_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -71,7 +90,35 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict[
     return payload
 
 
-def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = "*", order_by: str = "") -> List[Dict[str, Any]]:
+async def get_guard_or_user(request: Request, authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+    """A guard proving itself with a signed request (role 'guard'), or a logged-in user. Anything else is a 401."""
+    guard_id = request.headers.get("x-airlock-guard-id")
+    if not guard_id:
+        return await get_current_user(authorization)
+    guard = lookup_guard(guard_id)
+    ts = request.headers.get("x-airlock-timestamp", "")
+    sig = request.headers.get("x-airlock-signature", "")
+    ok = False
+    if guard and sig:
+        try:
+            fresh = abs((datetime.now(timezone.utc) - parse_iso8601_z(ts)).total_seconds()) <= 300
+        except ValueError:
+            fresh = False
+        raw_path = request.scope.get("raw_path") or request.url.path.encode()
+        path_qs = raw_path.decode() + (f"?{request.url.query}" if request.url.query else "")
+        expected = request_signature(guard["hmac_secret"], ts, request.method, path_qs, await request.body())
+        ok = fresh and hmac.compare_digest(expected, sig)
+    if not ok:
+        log_audit_event(actor=guard_id, action="bad_guard_request_signature", details={"path": request.url.path})
+        raise HTTPException(status_code=401, detail="Invalid guard signature")
+    return {"role": "guard", "user_id": guard_id, "guard_id": guard_id, "tenant_id": guard["tenant_id"]}
+
+
+def own_tenant_only(user: Dict[str, Any]) -> bool:
+    return user.get("role") in ("customer", "guard")
+
+
+def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = "*", order_by: str = "", where: str = "", params: tuple = (), limit: int = 0) -> List[Dict[str, Any]]:
     """
     Executes tenant-isolated queries respecting data residency and database-enforced RLS.
     Customers query only their assigned region database with their tenant RLS parameter.
@@ -79,7 +126,7 @@ def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = 
     """
     role = user.get("role")
     user_tenant = user.get("tenant_id")
-    order_clause = f" ORDER BY {order_by}" if order_by else ""
+    order_clause = (f" WHERE {where}" if where else "") + (f" ORDER BY {order_by}" if order_by else "") + (f" LIMIT {int(limit)}" if limit else "")
 
     if role == "customer":
         if not user_tenant:
@@ -88,20 +135,82 @@ def query_tenant_data(user: Dict[str, Any], table_name: str, select_cols: str = 
         region = get_tenant_assigned_region(user_tenant) or "in"
         db_name = "airlock_in" if region == "in" else "airlock_eu"
         query = f"SELECT {select_cols} FROM {table_name}{order_clause};"
-        return execute_query(db_name, query, tenant_id=user_tenant)
+        return execute_query(db_name, query, params, tenant_id=user_tenant)
     else:
         # Engineer: query both regions and combine
         res = []
         for db in ("airlock_in", "airlock_eu"):
             query = f"SELECT {select_cols} FROM {table_name}{order_clause};"
-            rows = execute_query(db, query, tenant_id="all")
+            rows = execute_query(db, query, params, tenant_id="all")
             res.extend(rows)
         return res
 
 
+# --- Phone Join & Heartbeat (T14) ---
+_phones: Dict[str, Dict[str, Any]] = {}
+
+
+class PhoneHeartbeatRequest(BaseModel):
+    phone_id: str
+    latency_ms: float = 0.0
+
+
+def record_phone_heartbeat(phone_id: str, latency_ms: float) -> Dict[str, Any]:
+    now_ts = time.time()
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = {
+        "phone_id": phone_id,
+        "tenant_id": "guests",
+        "latency_ms": latency_ms,
+        "last_heartbeat": now_iso,
+        "last_heartbeat_ts": now_ts,
+    }
+    _phones[phone_id] = entry
+    return entry
+
+
+def get_active_phones() -> List[Dict[str, Any]]:
+    now_ts = time.time()
+    results = []
+    for pid, p in list(_phones.items()):
+        elapsed = now_ts - p["last_heartbeat_ts"]
+        is_online = (elapsed <= 60.0)
+        latency = p.get("latency_ms", 0.0)
+        color = "red" if (not is_online or latency > 150.0) else "green"
+        results.append({
+            "phone_id": pid,
+            "tenant_id": "guests",
+            "status": "online" if is_online else "offline",
+            "color": color,
+            "latency_ms": latency,
+            "last_heartbeat": p["last_heartbeat"],
+            "last_seen_s_ago": round(elapsed, 1),
+        })
+    return results
+
+
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "hq-api"}
+    return {"status": "ok", "service": "hq-api", "phones": get_active_phones()}
+
+
+@app.post("/api/phones/heartbeat")
+def phone_heartbeat(req: PhoneHeartbeatRequest):
+    entry = record_phone_heartbeat(req.phone_id, req.latency_ms)
+    color = "red" if req.latency_ms > 150.0 else "green"
+    return {
+        "status": "ok",
+        "phone_id": req.phone_id,
+        "tenant_id": "guests",
+        "state": "online",
+        "color": color,
+        "latency_ms": req.latency_ms,
+    }
+
+
+@app.get("/api/phones")
+def list_phones():
+    return {"phones": get_active_phones()}
 
 
 @app.post("/api/login", response_model=LoginResponse)
@@ -134,21 +243,54 @@ def list_tenants(user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
 
 
 @app.get("/api/metrics")
-def get_metrics(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = query_tenant_data(user, "metrics", select_cols="id, payload_id, tenant_id, source, name, avg, max, event_time", order_by="event_time DESC")
+def get_metrics(since: Optional[str] = None, limit: int = Query(5000, ge=1, le=20000), user: Dict[str, Any] = Depends(get_current_user)):
+    """Newest first; `since` (ISO time) returns only newer rows, and at most `limit` rows per region come back."""
+    where, params = "", ()
+    if since:
+        where, params = ("event_time > %s" if is_postgres_available() else "event_time > ?"), (since,)
+    rows = query_tenant_data(user, "metrics", select_cols="id, payload_id, tenant_id, source, name, avg, max, event_time",
+                             order_by="event_time DESC", where=where, params=params, limit=limit)
     return {"metrics": rows}
 
 
 @app.get("/api/events")
-def get_events(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = query_tenant_data(user, "events", select_cols="id, payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time", order_by="event_time DESC")
+def get_events(limit: int = Query(200, ge=1, le=5000), user: Dict[str, Any] = Depends(get_current_user)):
+    rows = query_tenant_data(user, "events", select_cols="id, payload_id, tenant_id, source, category, severity, actor, count, window_s, event_time", order_by="event_time DESC", limit=limit)
     return {"events": rows}
 
 
+@app.get("/api/health/history")
+def get_health_history(limit: int = Query(100, ge=1, le=5000), user: Dict[str, Any] = Depends(get_current_user)):
+    """Health transitions written by the AIOps worker, newest first."""
+    rows = query_tenant_data(user, "health_history", select_cols="id, tenant_id, source, state, old_state, reasons, at", order_by="at DESC", limit=limit)
+    return {"history": sorted(rows, key=lambda r: str(r["at"]), reverse=True)[:limit]}
+
+
 @app.get("/api/payloads")
-def get_payloads(user: Dict[str, Any] = Depends(get_current_user)):
-    rows = query_tenant_data(user, "payloads", select_cols="payload_id, guard_id, tenant_id, seq, prev_hash, sent_at, window_start, window_end, received_at", order_by="seq DESC")
+def get_payloads(limit: int = Query(300, ge=1, le=2000), user: Dict[str, Any] = Depends(get_current_user)):
+    """Newest first. `sha256` is the receipt hash head office stored for the payload."""
+    rows = query_tenant_data(
+        user, "payloads LEFT JOIN receipts USING (payload_id)",
+        select_cols="payloads.payload_id, payloads.guard_id, payloads.tenant_id, payloads.seq, payloads.prev_hash, payloads.sent_at, "
+                    "payloads.window_start, payloads.window_end, payloads.received_at, receipts.sha256, receipts.status AS receipt_status",
+        order_by="payloads.received_at DESC", limit=limit)   # not seq: a guard restart resets seq, which buried the newest rows
     return {"payloads": rows}
+
+
+@app.get("/api/guards")
+def get_guards(user: Dict[str, Any] = Depends(get_current_user)):
+    """Each guard's self-reported health (from its newest stored payload) plus per-tenant leak counts."""
+    rows = query_tenant_data(
+        user, "payloads", select_cols="guard_id, tenant_id, seq, raw_payload, received_at",
+        where="received_at = (SELECT MAX(p2.received_at) FROM payloads p2 WHERE p2.guard_id = payloads.guard_id)")
+    guards = []
+    for r in rows:
+        raw = r["raw_payload"]
+        raw = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        guards.append({"guard_id": r["guard_id"], "tenant_id": r["tenant_id"], "seq": r["seq"],
+                       "last_payload_at": str(r["received_at"]), "policy_version": raw.get("policy_version"),
+                       **(raw.get("health") or {})})
+    return {"guards": guards, "leaks": {t: get_leak_badge_count(t) for t in {g["tenant_id"] for g in guards}}}
 
 
 @app.get("/api/incidents")
@@ -178,7 +320,7 @@ def get_alerts(user: Dict[str, Any] = Depends(get_current_user)):
 @app.get("/api/health")
 def get_health(user: Dict[str, Any] = Depends(get_current_user)):
     rows = query_tenant_data(user, "health_current", select_cols="tenant_id, source, state, reasons, since, flaps_prevented, updated")
-    return {"health": rows}
+    return {"health": rows, "phones": get_active_phones()}
 
 
 @app.get("/api/reconciliation")
@@ -202,25 +344,29 @@ def get_reconciliation_for_guard(guard_id: str, user: Dict[str, Any] = Depends(g
 
 
 @app.post("/api/regions/{region}/pause")
-def pause_region_endpoint(region: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+def pause_region_endpoint(region: str, user: Dict[str, Any] = Depends(get_guard_or_user)):
     if region not in ("in", "eu"):
         raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
-    if user and user.get("role") == "customer":
+    if user.get("role") == "customer":
         raise HTTPException(status_code=403, detail="Customer cannot pause regions")
+    if user.get("role") == "guard" and get_tenant_assigned_region(user["tenant_id"]) != region:   # the shop's chaos agent, for its own region only
+        raise HTTPException(status_code=403, detail="A guard may only pause its own tenant's region")
     set_region_paused(region, True)
-    actor = user.get("user_id", "chaos-console") if user else "chaos-console"
+    actor = user.get("user_id", "chaos-console")
     log_audit_event(actor=actor, action="region_paused", details={"region": region})
     return {"status": "ok", "region": region, "is_paused": True}
 
 
 @app.post("/api/regions/{region}/unpause")
-def unpause_region_endpoint(region: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
+def unpause_region_endpoint(region: str, user: Dict[str, Any] = Depends(get_guard_or_user)):
     if region not in ("in", "eu"):
         raise HTTPException(status_code=400, detail="Invalid region. Must be 'in' or 'eu'")
-    if user and user.get("role") == "customer":
+    if user.get("role") == "customer":
         raise HTTPException(status_code=403, detail="Customer cannot unpause regions")
+    if user.get("role") == "guard" and get_tenant_assigned_region(user["tenant_id"]) != region:   # the shop's chaos agent, for its own region only
+        raise HTTPException(status_code=403, detail="A guard may only unpause its own tenant's region")
     set_region_paused(region, False)
-    actor = user.get("user_id", "chaos-console") if user else "chaos-console"
+    actor = user.get("user_id", "chaos-console")
     log_audit_event(actor=actor, action="region_unpaused", details={"region": region})
     return {"status": "ok", "region": region, "is_paused": False}
 
@@ -241,17 +387,43 @@ class CompareCheckpointRequest(BaseModel):
 
 @app.get("/api/checkpoints/{guard_id}")
 def get_checkpoint_for_guard(guard_id: str, up_to_seq: Optional[int] = None, user: Dict[str, Any] = Depends(get_current_user)):
+    guard = lookup_guard(guard_id)
+    if user.get("role") == "customer" and (not guard or guard["tenant_id"] != user.get("tenant_id")):
+        raise HTTPException(status_code=403, detail="Access denied to this guard's checkpoint")
     return compute_guard_checkpoint(guard_id, up_to_seq=up_to_seq)
 
 
+_latest_checkpoints: Dict[str, Dict[str, Any]] = {}   # newest verified/mismatched checkpoint per guard (refilled by each guard every 60 s)
+
+
+@app.get("/api/checkpoints")
+def list_latest_checkpoints(user: Dict[str, Any] = Depends(get_current_user)):
+    rows = list(_latest_checkpoints.values())
+    if own_tenant_only(user):
+        rows = [r for r in rows if r["tenant_id"] == user.get("tenant_id")]
+    return {"checkpoints": rows}
+
+
 @app.post("/api/checkpoints/compare")
-def compare_checkpoint(req: CompareCheckpointRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    return compare_guard_checkpoint(
+def compare_checkpoint(req: CompareCheckpointRequest, user: Dict[str, Any] = Depends(get_guard_or_user)):
+    guard = lookup_guard(req.guard_id)
+    if user.get("role") == "guard" and user["guard_id"] != req.guard_id:
+        raise HTTPException(status_code=403, detail="A guard may only publish its own checkpoint")
+    if user.get("role") == "customer" and (not guard or guard["tenant_id"] != user.get("tenant_id")):
+        raise HTTPException(status_code=403, detail="Access denied to this guard's checkpoint")
+    result = compare_guard_checkpoint(
         guard_id=req.guard_id,
         up_to_seq=req.up_to_seq,
         guard_root=req.root,
         guard_hashes=req.hashes,
     )
+    if guard:
+        _latest_checkpoints[req.guard_id] = {
+            "guard_id": req.guard_id, "tenant_id": guard["tenant_id"], "up_to_seq": req.up_to_seq, "root": req.root,
+            "match": bool(result.get("match")), "first_differing_seq": result.get("first_differing_seq"),
+            "checkpoint_at": datetime.now(timezone.utc).isoformat(),
+        }
+    return result
 
 
 class CreateRevealRequest(BaseModel):
@@ -268,9 +440,11 @@ class DecisionRevealRequest(BaseModel):
 
 @app.post("/reveal-requests")
 @app.post("/api/reveal-requests")
-def post_reveal_request(req: CreateRevealRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
-    requested_by = (user.get("user_id") if user else "analyst") or "analyst"
+def post_reveal_request(req: CreateRevealRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    tenant_id = req.tenant_id or user.get("tenant_id") or "acme"
+    if user.get("role") == "customer":
+        tenant_id = user.get("tenant_id") or tenant_id  # a customer cannot file requests against another tenant
+    requested_by = user.get("user_id") or "analyst"
     return create_reveal_request(
         tenant_id=tenant_id,
         pseudonym=req.pseudonym,
@@ -282,15 +456,17 @@ def post_reveal_request(req: CreateRevealRequest, user: Optional[Dict[str, Any]]
 
 @app.get("/reveal-requests")
 @app.get("/api/reveal-requests")
-def get_reveal_requests(status: Optional[str] = None, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    tenant_id = user.get("tenant_id") if (user and user.get("role") == "customer") else None
+def get_reveal_requests(status: Optional[str] = None, user: Dict[str, Any] = Depends(get_guard_or_user)):
+    tenant_id = user.get("tenant_id") if own_tenant_only(user) else None
     return {"reveal_requests": list_reveal_requests(tenant_id=tenant_id, status=status)}
 
 
 @app.post("/reveal-requests/{request_id}/decision")
 @app.post("/api/reveal-requests/{request_id}/decision")
-def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    decided_by = user.get("user_id", "shop-manager") if user else "shop-manager"
+def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Dict[str, Any] = Depends(get_guard_or_user)):
+    if own_tenant_only(user) and not any(r["request_id"] == request_id for r in list_reveal_requests(tenant_id=user.get("tenant_id"))):
+        raise HTTPException(status_code=404, detail="Reveal request not found")
+    decided_by = user.get("user_id") or "shop-manager"
     updated = update_reveal_request_status(
         request_id=request_id,
         status=req.status,
@@ -302,32 +478,340 @@ def decide_reveal_request(request_id: str, req: DecisionRevealRequest, user: Opt
     return updated
 
 
+# --- Action Intents, Approvals, Dry-Run & Audit (T12) ---
+
+ALLOWED_ACTIONS = {"kill_process", "block_source", "block_ip", "restart_service", "investigate"}
+
+
+class ProposeActionRequest(BaseModel):
+    action: str  # kill_process | block_source | block_ip | restart_service | investigate
+    target: str  # pseudonym
+    why: str = ""
+    risk: str = "low"  # low | medium | high
+    reversible: bool = True
+    rollback: Optional[str] = None
+    incident_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+
+
+class ApproveActionRequest(BaseModel):
+    approved_by: str
+
+
+class ActionResultRequest(BaseModel):
+    guard_id: str
+    status: str = "done"  # done | failed | rejected (the shop manager declined)
+    details: Optional[Dict[str, Any]] = None
+    health_improved: bool = True
+    elapsed_seconds: int = 0
+
+
+@app.post("/api/actions/propose")
+def propose_action(
+    req: ProposeActionRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    tenant_id = req.tenant_id or user.get("tenant_id") or "acme"
+    if user.get("role") == "customer":
+        tenant_id = user.get("tenant_id") or tenant_id
+
+    # Head-office policy check 1: allowed action
+    if req.action not in ALLOWED_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Policy check failed: action '{req.action}' is not in allowed actions: {sorted(ALLOWED_ACTIONS)}",
+        )
+
+    # Head-office policy check 2: risk <= medium
+    risk_lower = req.risk.lower()
+    if risk_lower not in ("low", "medium"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Policy check failed: risk '{req.risk}' exceeds maximum allowed threshold (risk <= medium required)",
+        )
+
+    # Head-office policy check 3: max 3 per 10 minutes sliding window
+    recent_cnt = count_recent_intents(tenant_id, window_seconds=600)
+    if recent_cnt >= 3:
+        raise HTTPException(
+            status_code=429,
+            detail="Policy check failed: maximum 3 action proposals per 10 minutes exceeded for tenant",
+        )
+
+    intent = create_action_intent(
+        tenant_id=tenant_id,
+        action=req.action,
+        target=req.target,
+        risk=risk_lower,
+        why=req.why,
+        incident_id=req.incident_id,
+        reversible=req.reversible,
+        rollback=req.rollback,
+    )
+    return intent
+
+
+@app.post("/api/actions/{intent_id}/dry-run")
+def dry_run_action(
+    intent_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    intent = get_action_intent(intent_id)
+    if not intent or (own_tenant_only(user) and intent["tenant_id"] != user.get("tenant_id")):
+        raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
+
+    actor = user.get("user_id") or "operator"
+    updated = update_action_intent_status(intent_id=intent_id, status="dry_run_done")
+    simulation = {
+        "action": intent["action"],
+        "target": intent["target"],
+        "would_succeed": True,
+        "impact": f"Simulated execution of '{intent['action']}' on target '{intent['target']}': safe to proceed.",
+    }
+    log_action_audit(intent_id=intent_id, actor=actor, step="dry_run_done", details=simulation)
+    return {
+        "status": "dry_run_done",
+        "intent_id": intent_id,
+        "simulation": simulation,
+        "intent": updated,
+    }
+
+
+@app.post("/api/actions/{intent_id}/approve")
+def approve_action(
+    intent_id: str,
+    req: ApproveActionRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if not req.approved_by or not req.approved_by.strip():
+        raise HTTPException(status_code=400, detail="Approval requires the person's name (approved_by)")
+
+    intent = get_action_intent(intent_id)
+    if not intent or (own_tenant_only(user) and intent["tenant_id"] != user.get("tenant_id")):
+        raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
+
+    if intent["status"] != "dry_run_done":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Action must undergo dry run before approval (current status: '{intent['status']}')",
+        )
+
+    # Check expiration (10 minutes)
+    if intent.get("expires_at"):
+        exp_raw = str(intent["expires_at"]).rstrip("Z")
+        exp_dt = datetime.fromisoformat(exp_raw)
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) > exp_dt:
+            update_action_intent_status(intent_id=intent_id, status="expired")
+            log_action_audit(intent_id=intent_id, actor="system", step="expired")
+            raise HTTPException(status_code=400, detail="Action intent has expired (10-minute validity)")
+
+    updated = update_action_intent_status(intent_id=intent_id, status="approved", approved_by=req.approved_by.strip())
+    log_action_audit(intent_id=intent_id, actor=req.approved_by.strip(), step="approved")
+    return {
+        "status": "approved",
+        "intent_id": intent_id,
+        "approved_by": req.approved_by.strip(),
+        "intent": updated,
+    }
+
+
+@app.get("/api/actions")
+def list_actions(limit: int = 50, user: Dict[str, Any] = Depends(get_current_user)):
+    """All recent intents (customers see only their own tenant's)."""
+    rows = list_action_intents(limit)
+    if user.get("role") == "customer":
+        rows = [r for r in rows if r.get("tenant_id") == user.get("tenant_id")]
+    return {"intents": [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in r.items()} for r in rows]}
+
+
+@app.get("/api/actions/pending")
+def get_pending_actions(user: Dict[str, Any] = Depends(get_guard_or_user)):
+    """A guard (identified by its signature, never by a query parameter) gets its tenant's approved intents, each signed
+    with that guard's secret. Users see the same list unsigned."""
+    guard = lookup_guard(user["guard_id"]) if user["role"] == "guard" else None
+    tenant_id = user.get("tenant_id") if own_tenant_only(user) else None
+
+    signed_intents = []
+    for it in list_pending_action_intents(tenant_id=tenant_id):
+        created_at_str = it["created_at"].isoformat() if hasattr(it["created_at"], "isoformat") else str(it["created_at"])
+        signed_item = dict(it)
+        signed_item["created_at"] = created_at_str
+        signed_item["signature"] = None
+        if guard:
+            body_to_sign = json.dumps(
+                {"intent_id": it["intent_id"], "tenant_id": it["tenant_id"], "action": it["action"], "target": it["target"], "created_at": created_at_str},
+                sort_keys=True,
+            ).encode("utf-8")
+            signed_item["signature"] = hmac.new(guard["hmac_secret"].encode("utf-8"), body_to_sign, hashlib.sha256).hexdigest()
+            log_action_audit(intent_id=it["intent_id"], actor=user["guard_id"], step="pulled_by_guard")
+        signed_intents.append(signed_item)
+    return {"intents": signed_intents}
+
+
+@app.post("/api/actions/{intent_id}/result")
+def post_action_result(
+    intent_id: str,
+    req: ActionResultRequest,
+    user: Dict[str, Any] = Depends(get_guard_or_user),
+):
+    if user.get("role") == "customer":
+        raise HTTPException(status_code=403, detail="Only a guard reports execution results")
+    intent = get_action_intent(intent_id)
+    if not intent or (user["role"] == "guard" and intent["tenant_id"] != user.get("tenant_id")):
+        raise HTTPException(status_code=404, detail=f"Action intent '{intent_id}' not found")
+    if user["role"] == "guard":
+        req.guard_id = user["guard_id"]   # identity comes from the signature, not the body
+
+    if req.status == "rejected":   # the shop manager said no: nothing ran
+        updated = update_action_intent_status(intent_id=intent_id, status="rejected_by_shop")
+        log_action_audit(intent_id=intent_id, actor=req.guard_id, step="rejected_by_shop", details=req.details or {})
+        return {"status": "rejected_by_shop", "intent_id": intent_id, "intent": updated}
+
+    # If health did not improve or elapsed > 120s, trigger rollback
+    if not req.health_improved or req.elapsed_seconds > 120:
+        updated = update_action_intent_status(intent_id=intent_id, status="rolled_back")
+        log_action_audit(
+            intent_id=intent_id,
+            actor=req.guard_id,
+            step="rolled_back",
+            details={
+                "health_improved": req.health_improved,
+                "elapsed_seconds": req.elapsed_seconds,
+                "reason": "Health did not improve within 120s; automated rollback triggered",
+            },
+        )
+        return {
+            "status": "rolled_back",
+            "intent_id": intent_id,
+            "rollback_reason": "Health did not improve within 120s",
+            "intent": updated,
+        }
+
+    status_val = "done" if req.status == "done" else "failed"
+    updated = update_action_intent_status(intent_id=intent_id, status=status_val)
+    log_action_audit(
+        intent_id=intent_id,
+        actor=req.guard_id,
+        step=f"execution_{status_val}",
+        details=req.details or {},
+    )
+    return {
+        "status": status_val,
+        "intent_id": intent_id,
+        "intent": updated,
+    }
+
+
+@app.get("/api/actions/audit")
+def get_action_audit(
+    intent_id: Optional[str] = None,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if user.get("role") == "customer":
+        intent = get_action_intent(intent_id) if intent_id else None
+        if not intent or intent["tenant_id"] != user.get("tenant_id"):
+            raise HTTPException(status_code=403, detail="Customers may read the audit trail of their own tenant's intents only")
+    return {"audit_log": get_action_audit_logs(intent_id=intent_id)}
+
+
 class FeedbackRequest(BaseModel):
     alert_id: str
     user_id: Optional[str] = None
     tenant_id: Optional[str] = None
+    metric: Optional[str] = None
+    source: Optional[str] = None
 
 
 @app.post("/feedback")
 @app.post("/api/feedback")
-def post_feedback(req: FeedbackRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    user_id = req.user_id or (user.get("user_id") if user else "user-ops-1") or "user-ops-1"
-    tenant_id = req.tenant_id or (user.get("tenant_id") if user else "acme") or "acme"
-    return record_feedback(alert_id=req.alert_id, tenant_id=tenant_id, user_id=user_id)
+def post_feedback(req: FeedbackRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    user_id = req.user_id or user.get("user_id") or "user-ops-1"
+    tenant_id = (user.get("tenant_id") if user.get("role") == "customer" else None) or req.tenant_id or user.get("tenant_id") or "acme"
+    return record_feedback(
+        alert_id=req.alert_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        metric=req.metric,
+        source=req.source,
+    )
+
+
+@app.get("/api/baselines/{tenant_id}")
+def get_baselines_endpoint(
+    tenant_id: str,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Access denied to tenant baselines")
+    return get_tenant_baselines(tenant_id)
+
+
+@app.get("/api/damage-map/{tenant_id}")
+def get_damage_map_endpoint(tenant_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    if user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+        raise HTTPException(status_code=403, detail="Access denied to tenant damage map")
+    return get_damage_map(tenant_id)
 
 
 class ChatRequest(BaseModel):
     question: str
+    tenant_id: Optional[str] = None
+
+
+class ExplainRequest(BaseModel):
+    kind: str
+    id: str
+    tenant_id: Optional[str] = None
+
+
+@app.post("/api/ai/explain")
+async def post_ai_explain(req: ExplainRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    """Explain one alert or incident from its own evidence (the AI service builds a small, tenant-scoped fact set)."""
+    if user.get("role") == "engineer":
+        if not req.tenant_id:
+            raise HTTPException(status_code=400, detail="Engineers must specify an explicit tenant_id in request body")
+        tenant_id = req.tenant_id
+    else:
+        tenant_id = user.get("tenant_id")
+        if not tenant_id or (req.tenant_id and req.tenant_id != tenant_id):
+            raise HTTPException(status_code=403, detail="Customer cannot query other tenants")
+    if req.kind not in ("alert", "incident"):
+        raise HTTPException(status_code=400, detail="kind must be 'alert' or 'incident'")
+    url = os.getenv("AI_SERVICE_URL", "http://localhost:8010/chat").rsplit("/", 1)[0] + "/explain"
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            res = await client.post(url, json={"tenant_id": tenant_id, "kind": req.kind, "id": req.id})
+            if res.status_code == 200:
+                return res.json()
+    except Exception:
+        pass
+    return {"parts": None, "evidence_ids": [], "source": "error", "message": "The AI service is not reachable right now."}
 
 
 @app.post("/ai/chat")
 @app.post("/api/ai/chat")
-async def post_ai_chat(req: ChatRequest, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    tenant_id = (user.get("tenant_id") if user else "acme") or "acme"
+async def post_ai_chat(req: ChatRequest, user: Dict[str, Any] = Depends(get_current_user)):
+    role = user.get("role")
+    if role == "engineer":
+        if not req.tenant_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Engineers must specify an explicit tenant_id in request body",
+            )
+        tenant_id = req.tenant_id
+    else:
+        tenant_id = user.get("tenant_id")
+        if not tenant_id:
+            raise HTTPException(status_code=400, detail="User has no assigned tenant")
+        if req.tenant_id and req.tenant_id != tenant_id:
+            raise HTTPException(status_code=403, detail="Customer cannot query other tenants")
+
     ai_service_url = os.getenv("AI_SERVICE_URL", "http://localhost:8010/chat")
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             upstream_res = await client.post(
                 ai_service_url,
                 json={"tenant_id": tenant_id, "question": req.question},
@@ -343,14 +827,14 @@ async def post_ai_chat(req: ChatRequest, user: Optional[Dict[str, Any]] = Depend
         pass
 
     return {
-        "answer": f"AIOps AI Assistant (Tenant: {tenant_id}): Analyzing telemetry for '{req.question}'. No anomaly detected in current observation window.",
+        "answer": "The AI service is not reachable right now.",
         "evidence_ids": [],
     }
 
 
 @app.get("/api/counters/{tenant_id}")
-def get_counters_endpoint(tenant_id: str, user: Optional[Dict[str, Any]] = Depends(get_optional_user)):
-    if user and user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
+def get_counters_endpoint(tenant_id: str, user: Dict[str, Any] = Depends(get_current_user)):
+    if user.get("role") == "customer" and user.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=403, detail="Access denied to tenant counters")
     return get_tenant_counters(tenant_id)
 
@@ -391,4 +875,6 @@ async def websocket_live_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("hq.api.main:app", host="0.0.0.0", port=port, reload=False)
+    ssl_key = os.getenv("SSL_KEYFILE")
+    ssl_cert = os.getenv("SSL_CERTFILE")
+    uvicorn.run("hq.api.main:app", host="0.0.0.0", port=port, ssl_keyfile=ssl_key, ssl_certfile=ssl_cert, reload=False)

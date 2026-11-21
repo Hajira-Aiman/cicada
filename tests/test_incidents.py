@@ -57,8 +57,9 @@ def test_cpu_plus_latency_incident_contributions_and_confidence_by_hand():
     c = r.log[-1][1].to_contract()
     assert {s.name for s in c.signals} == {"cpu_pct", "latency_ms"}
     assert abs(sum(s.contribution_pct for s in c.signals) - 100) < 0.2
-    z = {s.name: abs(s.z) for s in c.signals}
+    z = {s.name: min(abs(s.z), 10.0) for s in c.signals}   # weights are capped at 10 so one huge z can't hide the rest
     assert abs([s for s in c.signals if s.name == "cpu_pct"][0].contribution_pct - 100 * z["cpu_pct"] / sum(z.values())) < 0.2
+    assert max(s.contribution_pct for s in c.signals) < 90   # no single signal swallows the bar chart
     # 2 signals, +1 if River agrees, + 0.1 named rule (cpu_with_latency_or_errors)
     agreeing = 2 + (1 if r.m.open[T].river else 0)
     assert c.confidence == round(min(0.4 + 0.15 * agreeing + 0.1, 0.95), 2)

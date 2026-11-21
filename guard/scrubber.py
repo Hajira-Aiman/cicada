@@ -17,7 +17,7 @@ AWS_SECRET_PATTERN = re.compile(r"(?i)(aws_secret_access_key\s*[:=]\s*['\"]?)([A
 JWT_PATTERN = re.compile(r"\b(eyJ[A-Za-z0-9-_]+\.eyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+)\b")
 BEARER_PATTERN = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9\-._~+/]{16,}=*)")
 PASSWORD_JSON_PATTERN = re.compile(r'(?i)("?(?:password|passwd|pwd)"?\s*[:=]\s*)"[^"]+"')
-PASSWORD_KV_PATTERN = re.compile(r'(?i)("?(?:password|passwd|pwd)"?\s*[:=]\s*)[^\s,;]+')
+PASSWORD_KV_PATTERN = re.compile(r'(?i)("?(?:password|passwd|pwd)"?\s*[:=]\s*)(?!"?\[REDACTED)[^\s,;]+')
 CARD_PATTERN = re.compile(r"\b(?:\d{4}[ -]?){3}\d{4}\b")
 SECRET_KV_PATTERN = re.compile(r'(?i)("?(?:api_key|apikey|secret_key|client_secret)"?\s*[:=]\s*)"[^"]+"')
 
@@ -69,11 +69,11 @@ class Scrubber:
         if m_json:
             redactions += len(m_json)
             scrubbed = PASSWORD_JSON_PATTERN.sub(r'\1"[REDACTED_PASSWORD]"', scrubbed)
-        else:
-            m_kv = list(PASSWORD_KV_PATTERN.finditer(scrubbed))
-            if m_kv:
-                redactions += len(m_kv)
-                scrubbed = PASSWORD_KV_PATTERN.sub(r"\1[REDACTED_PASSWORD]", scrubbed)
+        # key=value too: both styles can share a line (the KV pattern skips already-masked values)
+        m_kv = list(PASSWORD_KV_PATTERN.finditer(scrubbed))
+        if m_kv:
+            redactions += len(m_kv)
+            scrubbed = PASSWORD_KV_PATTERN.sub(r"\1[REDACTED_PASSWORD]", scrubbed)
 
         # 6. Credit Card Numbers
         matches = list(CARD_PATTERN.finditer(scrubbed))

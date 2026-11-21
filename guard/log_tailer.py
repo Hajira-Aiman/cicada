@@ -20,11 +20,27 @@ SSH_SUCCESS_PATTERN = re.compile(r"Accepted (?:password|publickey) for (\S+) fro
 
 
 class LogTailer:
-    def __init__(self, log_path: str = "data/shop-api.log", guard: Optional[Any] = None):
+    def __init__(self, log_path: str = "data/shop-api.log", guard: Optional[Any] = None, start_at_end: bool = False):
+        """The read position is saved next to the log, so a guard restart resumes instead of replaying every old line
+        (which would re-raise old honeypot hits and bursts). With no saved position, start_at_end skips existing history:
+        pass True when the guard has run before (its ledger is not empty)."""
         self.log_path = log_path
         self.guard = guard
+        self.state_path = log_path + ".offset"
         self.offset: int = 0
         Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.offset = int(Path(self.state_path).read_text().strip())
+        except (OSError, ValueError):
+            if start_at_end and os.path.exists(self.log_path):
+                self.offset = os.path.getsize(self.log_path)
+                self._save_offset()
+
+    def _save_offset(self) -> None:
+        try:
+            Path(self.state_path).write_text(str(self.offset))
+        except OSError as e:
+            logger.warning(f"Could not save tailer position {self.state_path}: {e}")
 
     def read_new_lines(self) -> List[str]:
         """Reads all new lines appended since the last check."""
@@ -32,11 +48,17 @@ class LogTailer:
             return []
 
         try:
-            with open(self.log_path, "r", encoding="utf-8", errors="replace") as f:
+            if os.path.getsize(self.log_path) < self.offset:
+                self.offset = 0  # file was truncated or rotated
+            with open(self.log_path, "rb") as f:
                 f.seek(self.offset)
-                lines = f.readlines()
-                self.offset = f.tell()
-                return [line.strip() for line in lines if line.strip()]
+                chunk = f.read()
+            end = chunk.rfind(b"\n") + 1  # only complete lines; a partial tail is read next time
+            if end:
+                self.offset += end
+                self._save_offset()
+            lines = chunk[:end].decode("utf-8", errors="replace").splitlines()
+            return [line.strip() for line in lines if line.strip()]
         except Exception as e:
             logger.warning(f"Error reading log file {self.log_path}: {e}")
             return []

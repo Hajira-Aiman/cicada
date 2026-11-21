@@ -14,7 +14,11 @@ import socket
 import uuid
 import hashlib
 import logging
+import statistics
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
+from email.utils import parsedate_to_datetime
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 import psutil
@@ -38,6 +42,7 @@ from guard.raw_store import RawStore
 from guard.scrubber import Scrubber
 from guard.detectors import AuthDetector, PowerDetector, ChangeDetector
 from guard.log_tailer import LogTailer
+from guard.log_patterns import PatternMiner
 from guard.policy_gate import PolicyGate
 from contracts.models import Checkpoint
 
@@ -78,6 +83,9 @@ class GuardThinSlice:
         self.host_pseudonym = self.pseudonym_mgr.get_or_create("host", self.hostname)
         self.pending_events: List[EventSample] = []
         self.pending_log_patterns: List[LogPatternSample] = []
+        self.pattern_miner = PatternMiner()
+        self.started_at = time.time()
+        self._loss_hist: deque = deque(maxlen=5)   # last 5 windows (~10 s) of packet-loss probes
 
         # Service pseudonyms registered in local reveal table
         self.service_pseudonyms = {
@@ -98,7 +106,7 @@ class GuardThinSlice:
             host_pseudonym=self.host_pseudonym,
         )
         shop_log_path = getattr(self.config, "SHOP_LOG_PATH", "data/shop-api.log")
-        self.log_tailer = LogTailer(log_path=shop_log_path, guard=self)
+        self.log_tailer = LogTailer(log_path=shop_log_path, guard=self, start_at_end=last_seq > 0)
         self.policy_gate = PolicyGate(scrubber=self.scrubber)
         self.last_checkpoint_time: float = 0.0
         self.last_checkpoint: Optional[Checkpoint] = None
@@ -108,6 +116,23 @@ class GuardThinSlice:
         self.last_net_bytes_recv = net.bytes_recv
         self.last_net_bytes_sent = net.bytes_sent
         self.last_net_time = time.perf_counter()
+
+        # head office's clock minus ours, learned from ingest's Date header; applied to every timestamp we send
+        self.clock_offset_s: float = 0.0
+
+    def now_utc(self) -> datetime:
+        return datetime.now(timezone.utc) + timedelta(seconds=self.clock_offset_s)
+
+    def learn_clock_offset(self, date_header: Optional[str]) -> None:
+        """Ingest rejects timestamps >300 s off and alerts at >30 s. A laptop with a wrong clock would be flagged on every
+        payload, so follow head office's clock. Date has 1 s resolution: ignore anything under 3 s."""
+        if not date_header:
+            return
+        try:
+            diff = (parsedate_to_datetime(date_header) - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            return
+        self.clock_offset_s = round(diff) if abs(diff) >= 3 else 0.0
 
     def emit_change_event(
         self,
@@ -143,6 +168,7 @@ class GuardThinSlice:
 
         # Mask secrets in pipeline
         scrubbed_line, count = self.scrubber.scrub_text(raw_line)
+        self.pattern_miner.add(scrubbed_line)   # patterns are mined from the scrubbed line only
         if count > 0:
             self.emit_change_event(
                 category="secret_redacted",
@@ -232,6 +258,7 @@ class GuardThinSlice:
             res = client.get(health_url)
             elapsed_ms = max(0.5, (time.perf_counter() - start) * 1000.0)
             if res.status_code == 200:
+                self._watch_shop_process(res)
                 return 1.0, round(elapsed_ms, 2)
             else:
                 self.emit_change_event(
@@ -252,6 +279,14 @@ class GuardThinSlice:
             if should_close:
                 client.close()
 
+    def _watch_shop_process(self, res) -> None:
+        """shop-api reports its pid; a new pid or start time since last window is an app_restarted change event."""
+        try:
+            pid = int(res.json()["pid"])
+            self.notify_shop_process(pid, psutil.Process(pid).create_time())
+        except Exception:
+            pass   # no pid in the response, or the service is not on this host
+
     def _get_ingest_host_port(self) -> Tuple[str, int]:
         """Extracts head-office ingest host and port for packet loss probes."""
         url = getattr(self.config, "REGION_URL", "") or os.getenv("INGEST_URL", "http://127.0.0.1:8001")
@@ -267,10 +302,11 @@ class GuardThinSlice:
         host: Optional[str] = None,
         port: Optional[int] = None,
         count: int = 10,
-        timeout: float = 0.05,
+        timeout: float = 0.5,
     ) -> float:
         """
-        Sends 10 small TCP connection attempts to the head-office ingest host:port.
+        Sends 10 small TCP connection attempts to the head-office ingest host:port, in parallel so a dead link costs one
+        timeout, not ten. 0.5 s: on hotspot Wi-Fi a healthy connect can exceed 50 ms and was being counted as loss.
         Reports failed share as a percent (0.0 to 100.0).
         """
         override = getattr(self, "_packet_loss_override", None)
@@ -282,17 +318,15 @@ class GuardThinSlice:
             host = host or h
             port = port or p
 
-        failed = 0
-        for _ in range(count):
+        def attempt(_) -> int:
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(timeout)
-                err = s.connect_ex((host, port))
-                if err != 0:
-                    failed += 1
-                s.close()
-            except Exception:
-                failed += 1
+                with socket.create_connection((host, port), timeout=timeout):
+                    return 0
+            except OSError:
+                return 1
+
+        with ThreadPoolExecutor(max_workers=count) as pool:
+            failed = sum(pool.map(attempt, range(count)))
 
         return round((failed / float(count)) * 100.0, 1)
 
@@ -323,7 +357,7 @@ class GuardThinSlice:
         - service_up (1.0 if healthy, 0.0 if down)
         - latency_ms (HTTP probe duration)
         """
-        now = datetime.now(timezone.utc)
+        now = self.now_utc()
         start_time = now - timedelta(seconds=duration_seconds)
         end_time = now
 
@@ -392,7 +426,14 @@ class GuardThinSlice:
             )
 
         # Real packet loss probe to head-office ingest host:port
-        packet_loss_val = self.measure_packet_loss()
+        raw_loss = self.measure_packet_loss()
+        if getattr(self, "_packet_loss_override", None) is not None:
+            packet_loss_val = raw_loss
+        else:
+            # a Wi-Fi stall fails all ten connects in one window (0 % or 100 %, nothing between). The median of the last
+            # 5 windows (~10 s) ignores an isolated stall but still reports a sustained outage (3+ bad windows).
+            self._loss_hist.append(raw_loss)
+            packet_loss_val = round(statistics.median(self._loss_hist), 1)
         metrics.append(
             MetricSample(
                 name="packet_loss_pct",
@@ -436,6 +477,16 @@ class GuardThinSlice:
         )
 
         payload_id = str(uuid.uuid4())
+
+        # Drain3 patterns for this window; a new pattern, or a burst of ERROR lines, is also a (metadata-only) event
+        samples = self.pattern_miner.drain()
+        self.pending_log_patterns.extend(samples)
+        shop_src = self.service_pseudonyms["shop-api"]
+        for smp in samples:
+            if smp.is_new and time.time() - self.started_at > 60:   # the first minute learns the usual patterns
+                self.pending_events.append(EventSample(category="new_log_pattern", severity="info", source=shop_src, count=1, window_s=2))
+            if smp.level in ("ERROR", "CRITICAL") and smp.count >= 10:
+                self.pending_events.append(EventSample(category="log_pattern_spike", severity="medium", source=shop_src, count=smp.count, window_s=2))
 
         # Collect and drain pending events
         events_to_send = list(self.pending_events)
@@ -508,21 +559,17 @@ class GuardThinSlice:
         Drains the outbox in oldest-first order (seq ASC) with backoff.
         """
         def _send(payload_id: str, body_bytes: bytes, client_obj: Optional[httpx.Client]):
-            try:
-                p_data = json.loads(body_bytes.decode("utf-8"))
-                sent_at = p_data.get("sent_at", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-            except Exception:
-                sent_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
+            # Header timestamp is the request send time (contracts.md), not the payload's
+            # creation time: buffered payloads must still pass ingest's +/-300s window.
             headers = create_auth_headers(
                 guard_id=self.config.GUARD_ID,
                 body_bytes=body_bytes,
-                timestamp_iso=sent_at,
+                timestamp_iso=self.now_utc().strftime("%Y-%m-%dT%H:%M:%SZ"),
                 secret_key=self.config.GUARD_SECRET_KEY,
             )
             should_close = False
             if client_obj is None:
-                client_obj = httpx.Client(timeout=self.config.TIMEOUT_SECONDS)
+                client_obj = httpx.Client(timeout=self.config.TIMEOUT_SECONDS, verify=self.config.TLS_VERIFY)
                 should_close = True
             try:
                 resp = client_obj.post(
@@ -530,6 +577,7 @@ class GuardThinSlice:
                     content=body_bytes,
                     headers=headers,
                 )
+                self.learn_clock_offset(resp.headers.get("date"))
                 resp.raise_for_status()
                 data = resp.json()
                 return IngestReceipt.model_validate(data)
@@ -611,17 +659,25 @@ def run_loop(
 
     # Reusable probe client avoids ~350ms per-window TCP/TLS handshake overhead
     probe_client = httpx.Client(timeout=1.0)
-    ingest_client = httpx.Client(timeout=guard.config.TIMEOUT_SECONDS)
+    ingest_client = httpx.Client(timeout=guard.config.TIMEOUT_SECONDS, verify=guard.config.TLS_VERIFY)
 
     iteration = 0
     try:
         while max_iterations is None or iteration < max_iterations:
             time.sleep(interval)
-            payload, body_bytes = guard.collect_window(
-                duration_seconds=interval, probe_client=probe_client
-            )
-            guard.send_payload(payload, body_bytes, client=ingest_client)
-            guard.maybe_publish_checkpoint()
+            try:
+                payload, body_bytes = guard.collect_window(
+                    duration_seconds=interval, probe_client=probe_client
+                )
+                guard.send_payload(payload, body_bytes, client=ingest_client)
+                cp = guard.maybe_publish_checkpoint()
+                if cp and os.getenv("HQ_URL"):   # head office checks the root against its own copy of the ledger
+                    from guard.hq_client import hq_call
+                    hq_call(guard.config, os.environ["HQ_URL"], "POST", "/api/checkpoints/compare",
+                            json_body={"guard_id": cp.guard_id, "up_to_seq": cp.up_to_seq, "root": cp.root})
+            except Exception:
+                # one bad window (a locked database, a dropped socket, a starved CPU) must never end the guard for good
+                logger.exception("Guard loop iteration failed; carrying on with the next window")
             iteration += 1
     except KeyboardInterrupt:
         logger.info("Guard stopped by operator.")

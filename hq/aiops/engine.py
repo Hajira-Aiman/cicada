@@ -45,6 +45,8 @@ class Thresholds:
     enter_s: float = 6.0        # bad data this long before entering a worse state
     exit_s: float = 20.0        # good data this long before returning to a better one
     event_hold_s: float = 10.0  # how long an event keeps its health effect
+    retire_s: float = 600.0     # a source silent this long is forgotten (shown offline until then)
+    replaced_s: float = 60.0    # ...or this long when another live source of the same kind has taken its place (a restarted process)
 
     @classmethod
     def with_overrides(cls, o: dict | None):
@@ -52,20 +54,27 @@ class Thresholds:
         return cls(**{k: v for k, v in (o or {}).items() if k in ok})
 
 
+# Smallest spread (in the metric's own unit) that counts as a real deviation. Calibrated on a real idle laptop on hotspot
+# Wi-Fi: its network counters idle at a few kbps and burst by hundreds, its latency jitters by tens of ms, its CPU by a few %.
+STD_FLOOR = {"cpu_pct": 3.0, "mem_pct": 2.0, "disk_pct": 1.0, "net_in_kbps": 100.0, "net_out_kbps": 100.0,
+             "latency_ms": 15.0, "packet_loss_pct": 2.0}
+
+
 class Baseline:
     """Exponentially weighted mean + spread. Cumulative average while warming up."""
-    def __init__(self):
+    def __init__(self, floor=0.01):
         self.n, self.mean, self.var, self.streak = 0, 0.0, 0.0, 0
+        self.floor = floor
 
     def std(self):
-        return max(math.sqrt(self.var), 0.05 * abs(self.mean), 0.01)  # floor so flat metrics don't explode z
+        return max(math.sqrt(self.var), 0.05 * abs(self.mean), self.floor)  # floors so flat metrics don't explode z
 
     def z(self, x, th):
         return None if self.n < th.warmup else (x - self.mean) / self.std()
 
-    def update(self, x, th):
+    def update(self, x, th, zf=None):
         z = self.z(x, th)
-        flagged = z is not None and abs(z) >= th.z_flag
+        flagged = z is not None and abs(z) >= (zf or th.z_flag)
         self.streak = self.streak + 1 if flagged else 0
         # ponytail: don't learn from anomalies, but re-learn after 30 flagged windows (60 s) so a new normal is accepted
         if not (flagged and self.streak <= 30):
@@ -94,6 +103,11 @@ class Engine:
     def __init__(self, thresholds_for=lambda tenant: Thresholds()):
         self.th = thresholds_for
         self.base, self.src = {}, {}
+        self.relaxed = {}   # (tenant, source, metric) -> epoch until which a thumbs-down raises the flag level
+
+    def thumbs_down(self, tenant, source, metric, now, minutes=30, bump=0.5):
+        """T9: a thumbs-down on an alert raises that signal's flag level by `bump` sigma for `minutes`."""
+        self.relaxed[(tenant, source, metric)] = (now + minutes * 60, bump)
 
     def ingest(self, tenant, source, ts, arrived, metrics: dict, events=()):
         """One window for one source. ts = event time, arrived = receive time (both epoch seconds)."""
@@ -103,7 +117,9 @@ class Engine:
         for name, v in metrics.items():
             st.last[name] = v
             if name in Z_METRICS:
-                st.z[name] = self.base.setdefault((tenant, source, name), Baseline()).update(v, th)
+                until, bump = self.relaxed.get((tenant, source, name), (0, 0))
+                st.z[name] = self.base.setdefault((tenant, source, name), Baseline(STD_FLOOR.get(name, 0.01))).update(
+                    v, th, th.z_flag + bump if arrived < until else None)
         for cat, sev, *rest in events:  # optional extras: count, actor pseudonym
             st.events[cat] = (ts, sev, rest[0] if rest else 1, rest[1] if len(rest) > 1 else None)
 
@@ -166,6 +182,24 @@ class Engine:
         st.committed, st.reasons, st.pending, st.since = raw, reasons, None, now
         return Change(tenant_id=tenant, source=source, state=raw, old_state=old, reasons=reasons,
                             at=datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+    def retire(self, now):
+        """Forget sources that have been silent for retire_s so a replaced or removed host does not stay 'poor' forever.
+        Returns [(tenant, source)] retired; a source that comes back simply starts fresh."""
+        def replaced(t, s, st):
+            kind = s.split("-")[0]
+            return now - (st.last_arrival or 0) >= self.th(t).replaced_s and any(
+                k[0] == t and k[1] != s and k[1].split("-")[0] == kind and now - (o.last_arrival or 0) < self.th(t).stale_s
+                for k, o in self.src.items())
+        gone = [(t, s) for (t, s), st in self.src.items()
+                if now - (st.last_arrival or 0) >= self.th(t).retire_s or replaced(t, s, st)]
+        for t, s in gone:
+            del self.src[(t, s)]
+            for k in [k for k in self.base if k[:2] == (t, s)]:
+                del self.base[k]
+            for k in [k for k in self.relaxed if k[:2] == (t, s)]:
+                del self.relaxed[k]
+        return gone
 
     def evaluate(self, now):
         """Run every source once; returns the committed state changes."""

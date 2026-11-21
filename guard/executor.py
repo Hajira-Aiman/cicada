@@ -17,6 +17,7 @@ Remediation Executor with Dry Run (T18):
   * Local audit row recorded for every step
 """
 
+import ipaddress
 import os
 import sys
 import time
@@ -108,11 +109,13 @@ class RemediationExecutor:
         if action == "kill_process":
             # Attempt to find and terminate process
             killed = False
+            if len(real_target) < 4:
+                real_target = "\0"  # too short to match safely (e.g. "db"); matches nothing
             for proc in psutil.process_iter(["pid", "name", "cmdline"]):
                 try:
                     pname = proc.info.get("name") or ""
                     pcmd = " ".join(proc.info.get("cmdline") or [])
-                    if real_target in pname or real_target in pcmd or str(proc.info.get("pid")) == real_target:
+                    if real_target == pname or real_target in pcmd or str(proc.info.get("pid")) == real_target:
                         # Safety check: never kill self or vital system processes
                         if proc.pid != os.getpid():
                             proc.terminate()
@@ -125,6 +128,10 @@ class RemediationExecutor:
             message = f"Process {intent.target} ({real_target}) terminated" if killed else f"Process {intent.target} was not running"
 
         elif action in ("block_source", "block_ip"):
+            try:
+                ipaddress.ip_address(real_target)
+            except ValueError:
+                return {"status": "rejected", "reason": f"Target {intent.target} does not resolve to an IP address"}
             expiry_ts = now + (15 * 60)
             self.blocked_ips[real_target] = expiry_ts
 

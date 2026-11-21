@@ -29,6 +29,8 @@ class GuardConfig:
     REVEAL_DB_PATH: str = os.getenv("REVEAL_DB_PATH", "data/reveal.db")
     SHOP_LOG_PATH: str = os.getenv("SHOP_LOG_PATH", "data/shop-api.log")
     TIMEOUT_SECONDS: float = 5.0
+    # path to the CA / self-signed cert that signed head office's TLS cert; unset = system CAs (https) or plain http
+    TLS_VERIFY = os.getenv("INGEST_CA_CERT") or True
 
 
 config = GuardConfig()

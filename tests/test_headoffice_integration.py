@@ -4,7 +4,7 @@ import pytest
 from httpx import AsyncClient, ASGITransport
 from contracts.models import IngestReceipt
 from hq.api.broadcaster import broadcaster
-from hq.db import execute_query, init_all_databases, register_guard
+from hq.db import execute_query, init_all_databases, register_guard, truncate_all_data
 from hq.ingest.main import create_ingest_app
 from tools.simulate import SimulatedGuardState, compute_hmac_signature
 
@@ -12,6 +12,7 @@ from tools.simulate import SimulatedGuardState, compute_hmac_signature
 @pytest.mark.anyio
 async def test_end_to_end_head_office_pipeline():
     init_all_databases()
+    truncate_all_data()   # earlier tests leave payloads behind and break the residency assertions
     # Register guards for Acme (India) and Globex (Europe)
     register_guard("guard-globex-01", "globex", "sec-globex-super-secret-key-2026")
     register_guard("guard-acme-01", "acme", "sec-acme-super-secret-key-2026")
@@ -61,8 +62,7 @@ async def test_end_to_end_head_office_pipeline():
 
     # 3. Verify WebSocket broadcaster received the live event
     assert len(ws_events) >= 1
-    assert ws_events[-1]["tenant_id"] == "globex"
-    assert ws_events[-1]["event_type"] == "metrics_batch"
+    assert any(e["event_type"] == "metrics_batch" and e["tenant_id"] == "globex" for e in ws_events)
 
     # 4. Simulate Acme guard posting to India Ingest (:8001)
     acme_guard = SimulatedGuardState(
