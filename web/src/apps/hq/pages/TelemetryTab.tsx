@@ -32,9 +32,17 @@ const SCENARIOS: { id: string; label: string; names: string[]; metrics: string[]
   { id: 'brute_force', label: 'BRUTE FORCE', names: ['brute_force', 'login_burst'], metrics: [], events: ['auth_failure_burst', 'login_after_failures'], hint: 'A burst of failed logins should appear as one tall bar.', focus: ['logins'] },
   { id: 'kill_chain', label: 'KILL CHAIN', names: ['kill_chain'], metrics: ['cpu_pct', 'net_out_kbps'], events: ['auth_failure_burst', 'login_after_failures'], hint: 'Failed logins, then CPU, then outbound traffic: one critical incident.', focus: ['cpu_pct', 'net_out_kbps'] },
   { id: 'backup_job', label: 'BACKUP JOB', names: ['backup_job'], metrics: ['cpu_pct'], events: [], hint: 'Repeating CPU pulses: the system learns them as a normal schedule.', focus: ['cpu_pct'] },
+  { id: 'port_scan', label: 'PORT SCAN', names: ['port_scan'], metrics: ['net_out_kbps', 'net_in_kbps'], events: [], hint: 'NETWORK: a flood of connection probes, visible as outbound traffic.', focus: ['net_out_kbps'] },
+  { id: 'data_exfil', label: 'DATA EXFIL', names: ['data_exfil'], metrics: ['net_out_kbps'], events: [], hint: 'NETWORK: outbound traffic should jump far above its normal band.', focus: ['net_out_kbps'] },
+  { id: 'crypto_miner', label: 'CRYPTO-MINER', names: ['crypto_miner'], metrics: ['cpu_pct', 'net_out_kbps'], events: [], hint: 'COMPUTE: sustained high CPU with steady outbound traffic.', focus: ['cpu_pct', 'net_out_kbps'] },
+  { id: 'crash_loop', label: 'CRASH LOOP', names: ['crash_loop'], metrics: ['service_up'], events: ['app_restarted'], hint: 'COMPUTE: the shop app restarts every few seconds, each one an app_restarted event.', focus: ['service_up'] },
+  { id: 'ransomware', label: 'RANSOMWARE CHURN', names: ['ransomware'], metrics: ['disk_pct', 'cpu_pct'], events: [], hint: 'STORAGE: files rewritten and renamed with encryption work, so CPU climbs.', focus: ['cpu_pct'] },
+  { id: 'slow_disk', label: 'SLOW DISK / DB', names: ['slow_disk'], metrics: ['latency_ms', 'disk_pct'], events: [], hint: 'STORAGE: the shop answers slower while the disk is saturated.', focus: ['latency_ms'] },
+  { id: 'http_5xx', label: 'HTTP 5XX STORM', names: ['http_5xx'], metrics: ['latency_ms', 'service_up'], events: [], hint: 'WEB APP: catalog, checkout and the health check fail, so the shop shows as down.', focus: ['latency_ms'] },
+  { id: 'credential_stuffing', label: 'CREDENTIAL STUFFING', names: ['credential_stuffing'], metrics: [], events: ['auth_failure_burst', 'login_after_failures'], hint: 'WEB APP: a steady stream of failed logins, then one success.', focus: ['logins'] },
 ];
 
-const RANGES = [{ l: '5 MIN', ms: 5 * 60e3 }, { l: '15 MIN', ms: 15 * 60e3 }, { l: '1 HOUR', ms: 3600e3 }];
+const RANGES =[{ l: '5 MIN', ms: 5 * 60e3 }, { l: '15 MIN', ms: 15 * 60e3 }, { l: '1 HOUR', ms: 3600e3 }];
 const STATE_COLOR: Record<string, string> = { excellent: '#34d399', good: '#a3e635', fair: '#fbbf24', poor: '#f43f5e', offline: '#64748b' };
 const SYSTEMS = [{ id: 'acme', label: 'SYSTEM 1' }, { id: 'globex', label: 'SYSTEM 2' }];
 

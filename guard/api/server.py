@@ -87,6 +87,16 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
             "last_seq": last_seq,
         }
 
+    @api.get("/api/metrics")
+    def get_metrics():
+        """The newest readings this guard measured (from the last payload it signed), one value per metric name."""
+        rows = _guard.ledger.get_recent_rows(limit=1)
+        body = json.loads(rows[0]["body"]) if rows else {}
+        out: Dict[str, float] = {}
+        for m in body.get("metrics", []):
+            out.setdefault(m["name"], m["avg"])
+        return {"seq": body.get("seq"), "sent_at": body.get("sent_at"), "metrics": out}
+
     @api.get("/api/raw-logs")
     def get_raw_logs(request: Request, minutes: int = 60):
         """

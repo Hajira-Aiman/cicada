@@ -69,10 +69,25 @@ def _run_cpu_burner(duration_s: float, cores: Optional[int] = None, duty: float 
         k.wait()
 
 
+def _net_target() -> str:
+    """Where network scenarios send packets: CHAOS_EXFIL_HOST, else the guard's ingest host. Loopback never touches the
+    network card (so the guard would not see it): then use 192.0.2.1, which still leaves through the card."""
+    from urllib.parse import urlparse
+    host = os.getenv("CHAOS_EXFIL_HOST")
+    if not host:
+        try:
+            from guard.config import config
+            host = urlparse(config.REGION_URL).hostname
+        except Exception:
+            host = None
+    return host if host and host not in ("localhost", "127.0.0.1", "::1") else "192.0.2.1"
+
+
 def _run_exfil(duration_s: float, rate_kbps: int = 4000):
-    """Real outbound burst: UDP datagrams to a TEST-NET address (RFC 5737, never routed). They still leave through
-    the network card, so the guard's net_out_kbps (psutil NIC counters) really spikes. Nothing is delivered anywhere."""
+    """Real outbound burst: UDP datagrams to the head-office ingest host (discard port 9, nothing listens). They leave through
+    the network card, so the guard's net_out_kbps (psutil NIC counters) really spikes."""
     import socket
+    host = _net_target()
     end_time = time.time() + duration_s
     chunk = b"x" * 1200
     per_s = max(1, int(rate_kbps * 1000 / 8 / len(chunk)))
@@ -80,7 +95,7 @@ def _run_exfil(duration_s: float, rate_kbps: int = 4000):
         while time.time() < end_time:
             for _ in range(per_s // 10):
                 try:
-                    sock.sendto(chunk, ("192.0.2.1", 9))
+                    sock.sendto(chunk, (host, 9))
                 except OSError:
                     pass
             time.sleep(0.1)
@@ -268,32 +283,30 @@ def _run_restart_app(target: Optional[str] = None):
         pass  # neither systemctl nor docker on this host (e.g. Windows)
 
 
-def _shop_log(text: str):
-    """One line into the shop's log (the guard tails it)."""
-    import httpx
-    try:
-        httpx.post(f"{SHOP_API_URL}/chaos/inject-log", json={"text": text}, timeout=2)
-    except httpx.HTTPError:
-        pass
-
-
 def _run_port_scan(duration_s: float):
-    """Real connection attempts across ports 1-1024 on this machine, round after round."""
+    """Real SYN probes over ports 1-1024 of the target host from 64 threads, round after round (visible as outbound packets)."""
     import socket
+    host = _net_target()
     end = time.time() + duration_s
-    _shop_log("Port scan detected: sequential connection attempts to ports 1-1024 from 10.0.0.66")
-    while time.time() < end:
-        for port in range(1, 1025):
-            if time.time() > end:
-                break
-            with socket.socket() as s:
-                s.settimeout(0.02)
-                s.connect_ex(("127.0.0.1", port))
+
+    def scan():
+        while time.time() < end:
+            for port in range(1, 1025):
+                if time.time() > end:
+                    return
+                with socket.socket() as sk:
+                    sk.settimeout(0.05)
+                    sk.connect_ex((host, port))
+
+    ts = [threading.Thread(target=scan, daemon=True) for _ in range(64)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
 
 
 def _run_crypto_miner(duration_s: float):
     """Sustained CPU on every core plus a steady trickle to a mining pool (TEST-NET, never delivered)."""
-    _shop_log("Unknown process xmrig-update started, connecting to pool.minexmr.example:4444")
     threading.Thread(target=_run_exfil, args=(duration_s, 1500), daemon=True).start()
     _run_cpu_burner(duration_s, cores=os.cpu_count() or 2, duty=0.7)
 
@@ -302,31 +315,37 @@ def _run_crash_loop(duration_s: float):
     """The shop app dies and restarts every ~8 s: the guard reports app_restarted each time."""
     end = time.time() + duration_s
     while time.time() < end:
-        _shop_log("shop-api exited with code 137 (killed), supervisor restarting it")
         _restart_shop_api_by_pid()
         time.sleep(8)
 
 
 def _run_ransomware(duration_s: float):
-    """Real disk churn in a temp folder: create, rewrite and rename (.locked) files as fast as possible."""
-    import tempfile
+    """Real ransomware work on every core: write, "encrypt" (compress + hash) and rename (.locked) files in a temp folder."""
+    import tempfile, zlib, hashlib
     end = time.time() + duration_s
-    _shop_log("Mass file modification: 500+ files renamed to *.locked in 10 s under C:/Users/shop/Documents")
     with tempfile.TemporaryDirectory(prefix="chaos_churn_") as d:
-        i = 0
-        while time.time() < end:
-            f = os.path.join(d, f"doc{i % 300}.txt")
-            with open(f, "wb") as fh:
-                fh.write(os.urandom(256 * 1024))
-            os.replace(f, f + ".locked")
-            i += 1
+        def churn(k: int):
+            i = 0
+            while time.time() < end:
+                f = os.path.join(d, f"doc{k}_{i % 100}.txt")
+                data = os.urandom(512 * 1024)
+                for _ in range(6):
+                    data = hashlib.sha256(zlib.compress(data, 6)).digest() * 16384
+                with open(f, "wb") as fh:
+                    fh.write(data)
+                os.replace(f, f + ".locked")
+                i += 1
+        ts = [threading.Thread(target=churn, args=(k,), daemon=True) for k in range(max(1, (os.cpu_count() or 2) * 2 // 3))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
 
 
 def _run_slow_disk(duration_s: float, delay_ms: int = 800):
     """Disk saturated by fsync'd writes while the shop answers slowly (its database is waiting on I/O)."""
     import tempfile
     _run_shop_latency(duration_s, delay_ms)
-    _shop_log("Postgres: slow query 4210 ms (disk I/O wait high)")
     end = time.time() + duration_s
     with tempfile.TemporaryFile() as fh:
         while time.time() < end:
@@ -375,6 +394,37 @@ def _run_credential_stuffing(duration_s: float):
             c.post(SHOP_LOGIN_URL, json={"username": "admin", "password": "securepass2026"})
         except httpx.HTTPError:
             pass
+
+
+GUARD_API_URL = os.getenv("GUARD_API_URL", "http://127.0.0.1:9000")
+_readings: Dict[str, Dict[str, Any]] = {}   # scenario id -> what the guard measured before / at peak / after
+SHOWN = ("cpu_pct", "mem_pct", "disk_pct", "net_out_kbps", "latency_ms")
+
+
+def _guard_metrics() -> Dict[str, float]:
+    import httpx
+    try:
+        return httpx.get(f"{GUARD_API_URL}/api/metrics", timeout=2).json().get("metrics", {})
+    except Exception:
+        return {}
+
+
+def _with_readings(scn_id: str, worker, duration_s: float):
+    """Runs the scenario while polling the guard's own readings: before, the peak during, and 10 s after it ends."""
+    rec = _readings[scn_id] = {"done": False, "before": _guard_metrics(), "peak": {}, "after": {}}
+    t = threading.Thread(target=worker, args=(duration_s,), daemon=True)
+    t.start()
+    end = time.time() + duration_s + 10
+    while time.time() < end:
+        time.sleep(2)
+        now = _guard_metrics()
+        if t.is_alive() or time.time() < end - 10:
+            for k, v in now.items():
+                rec["peak"][k] = max(rec["peak"].get(k, v), v)
+        else:
+            rec["after"] = now
+    rec["after"] = rec["after"] or _guard_metrics()
+    rec["done"] = True
 
 
 NEW_SCENARIOS = {   # name -> worker(duration_s)
@@ -447,7 +497,7 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
         else:
             threading.Thread(target=_run_shop_latency, args=(duration_s, delay), daemon=True).start()
     elif name in NEW_SCENARIOS:
-        threading.Thread(target=NEW_SCENARIOS[name], args=(duration_s,), daemon=True).start()
+        threading.Thread(target=_with_readings, args=(scn_id, NEW_SCENARIOS[name], duration_s), daemon=True).start()
     elif name == "restart_app":
         worker = _run_restart_app if sys.platform.startswith("linux") else _restart_shop_api_by_pid
         threading.Thread(target=worker, args=(target,) if worker is _run_restart_app else (), daemon=True).start()
@@ -501,6 +551,14 @@ def list_scenarios():
 def get_history():
     with _lock:
         return {"history": list(_history)}
+
+
+@app.get("/chaos/readings/{scn_id}")
+def get_readings(scn_id: str):
+    rec = _readings.get(scn_id)
+    if rec is None:
+        raise HTTPException(status_code=404, detail="No readings for this run")
+    return {**rec, "shown": SHOWN}
 
 
 @app.get("/chaos/active")

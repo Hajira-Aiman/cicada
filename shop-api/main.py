@@ -35,7 +35,7 @@ _errors = {"until": 0.0}   # chaos: catalog and checkout answer HTTP 500 until t
 
 @app.middleware("http")
 async def artificial_latency(request: Request, call_next):
-    if time.time() < _errors["until"] and request.url.path in ("/catalog", "/cart/checkout"):
+    if time.time() < _errors["until"] and request.url.path in ("/catalog", "/cart/checkout", "/health"):
         log_shop_event({"level": "ERROR", "event": "http_500", "message": f"HTTP 500 on {request.url.path}: upstream database connection failed"})
         return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
     if time.time() < _delay["until"] and not request.url.path.startswith("/chaos"):
