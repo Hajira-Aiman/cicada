@@ -14,16 +14,35 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
+try:
+    from contracts.request_auth import PRIVATE_ORIGIN_REGEX
+except ImportError:
+    PRIVATE_ORIGIN_REGEX = r"^https?://(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)(:\d+)?$"
 
 LOG_FILE_PATH = os.getenv("SHOP_LOG_PATH", "data/shop-api.log")
 Path(LOG_FILE_PATH).parent.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Demo Shop API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=PRIVATE_ORIGIN_REGEX,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 _delay = {"until": 0.0, "ms": 0}   # chaos: every non-chaos request waits `ms` until `until`

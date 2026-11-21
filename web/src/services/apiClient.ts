@@ -1,7 +1,9 @@
 import { useUiStore } from '../stores/uiStore';
 
-// same host as the page, so a phone or a second laptop on the hotspot reaches head office too
-const API_BASE_URL = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:8000`;
+// same host as the page, or Laptop A (192.168.137.1) when running locally on the shop laptop
+const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+const defaultHq = isLocal ? '192.168.137.1' : (typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : '192.168.137.1');
+const API_BASE_URL = import.meta.env.VITE_API_URL || `http://${defaultHq}:8000`;
 
 interface RequestOptions extends RequestInit {
   timeoutMs?: number;

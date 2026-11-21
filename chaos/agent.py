@@ -49,22 +49,16 @@ _lock = threading.Lock()
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
 
 def _run_cpu_burner(duration_s: float, cores: Optional[int] = None, duty: float = 1.0):
-    """Loads `cores` cores (default: every core but one) for duration_s, each busy `duty` of the time, so duty=0.7 on every core
-    is about 70% CPU overall. One child process per core (a Python thread would only reach one core), at below-normal priority so
-    the guard and the network stack keep getting scheduled while the spike is still clearly visible."""
+    """Loads 8 cores at 100% continuous busy loop (no time.sleep).
+    On an 8-core / 16-thread CPU, 8 pure worker processes peg Task Manager cleanly to ~70-75% CPU,
+    leaving 8 full logical threads completely free for Windows, Wi-Fi networking, and Guard.
+    """
     import subprocess
     import sys
-    duty = min(1.0, max(0.05, duty))
-    code = (f"import time; e = time.time() + {duration_s}\n"
-            f"while time.time() < e:\n"
-            f"    t = time.time() + 0.1 * {duty}\n"
-            f"    while time.time() < t: pass\n"
-            f"    time.sleep(0.1 * {1 - duty})")
-    flags = getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)   # Windows; on Linux the child lowers itself below
-    pre = (lambda: os.nice(10)) if hasattr(os, "nice") else None
-    kids = [subprocess.Popen([sys.executable, "-c", code], creationflags=flags, preexec_fn=pre) if pre else
-            subprocess.Popen([sys.executable, "-c", code], creationflags=flags)
-            for _ in range(cores or max(1, (os.cpu_count() or 2) - 1))]
+    num_workers = cores if cores is not None else 8
+    code = f"import time; e = time.time() + {duration_s}\nwhile time.time() < e: pass\n"
+    flags = getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0x20)
+    kids = [subprocess.Popen([sys.executable, "-c", code], creationflags=flags) for _ in range(num_workers)]
     for k in kids:
         k.wait()
 
@@ -144,7 +138,7 @@ def _run_kill_chain(duration_s: float):
 
     # Stage 3: CPU on every core; Stage 4: outbound burst on top of it (miner talking to its pool)
     threading.Thread(target=lambda: (time.sleep(step_duration), _run_exfil(step_duration, 30000)), daemon=True).start()
-    _run_cpu_burner(step_duration * 2, cores=os.cpu_count() or 2, duty=0.7)   # about 70% like the CPU spike, never pinned
+    _run_cpu_burner(step_duration * 2, cores=max(1, (os.cpu_count() or 4) - 2), duty=0.65)
 
 
 def _run_region_outage(region: str, duration_s: float):
@@ -302,11 +296,7 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
     # Trigger real effect in background worker thread
     p = params or {}
     if name == "cpu_spike":
-        pct = min(95, max(10, int(p.get("target_pct", 70))))   # overall CPU to reach: 70% by default, never pinned at 100%
-        import psutil
-        load = psutil.cpu_percent(interval=0.5)   # what the machine already uses: only add the difference
-        duty = max(0.1, pct - load) / 100.0
-        threading.Thread(target=_run_cpu_burner, args=(duration_s, os.cpu_count() or 2, duty), daemon=True).start()
+        threading.Thread(target=_run_cpu_burner, args=(duration_s, 8), daemon=True).start()
     elif name in ("brute_force", "login_burst"):
         target_url = p.get("url", SHOP_LOGIN_URL)
         threading.Thread(target=_run_brute_force, args=(duration_s, target_url), daemon=True).start()
@@ -337,6 +327,16 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
             except Exception as exc:   # ingest unreachable etc.
                 entry["result"] = {"error": str(exc)}
         threading.Thread(target=record, daemon=True).start()
+    elif name in ("leak", "try_to_leak"):
+        leak_msg = p.get("leak_text", "AKIACANARY99999999SECRET")
+
+        def do_leak():
+            try:
+                import httpx
+                httpx.post(f"{SHOP_API_URL}/chaos/inject-log", json={"text": leak_msg}, timeout=3.0)
+            except Exception as exc:
+                entry["result"] = {"error": str(exc)}
+        threading.Thread(target=do_leak, daemon=True).start()
 
     return entry
 

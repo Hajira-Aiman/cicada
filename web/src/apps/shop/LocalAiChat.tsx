@@ -80,9 +80,25 @@ export const LocalAiChat: React.FC<LocalAiChatProps> = ({
     setIsTyping(true);
 
     // Real answer: the guard on this machine reads its raw logs (nothing leaves the shop)
-    askShopAI(text.trim()).then((reply) => reply, (e) => e.message).then((replyText) => {
-      const refs: AiReference[] = logs.filter((l) => replyText.includes(l.id)).slice(0, 3)
+    askShopAI(text.trim()).then((reply) => reply, (e) => e.message).then((rawReply) => {
+      // Clean up any markdown bold asterisks or emojis as defense in depth
+      const replyText = rawReply
+        .replace(/\*\*/g, '')
+        .replace(/\*/g, '')
+        .replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}]/gu, '')
+        .trim();
+
+      const logRefs: AiReference[] = logs.filter((l) => replyText.includes(String(l.id)) || replyText.includes(`Log #${l.id}`)).slice(0, 3)
         .map((l) => ({ type: 'log' as const, label: `Log #${l.id} (${l.level})`, targetId: l.id }));
+
+      const egressRefs: AiReference[] = egressList.filter((e) => replyText.includes(String(e.seq))).slice(0, 2)
+        .map((e) => ({ type: 'egress' as const, label: `Egress Seq #${e.seq}`, targetId: String(e.seq) }));
+
+      const bufferRefs: AiReference[] = (replyText.toLowerCase().includes('buffer') || replyText.toLowerCase().includes('outbox'))
+        ? [{ type: 'buffer' as const, label: 'Outbox Buffer', targetId: 'buffer' }]
+        : [];
+
+      const refs: AiReference[] = [...logRefs, ...egressRefs, ...bufferRefs].slice(0, 4);
 
       const aiMsg: ChatMessage = {
         id: `ai-${Date.now()}`,

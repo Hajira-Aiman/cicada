@@ -113,7 +113,7 @@ def create_guard_api_app(guard: Optional[GuardThinSlice] = None) -> FastAPI:
         client_ip = request.client.host if request.client else "127.0.0.1"
         if client_ip not in ("127.0.0.1", "::1", "localhost", "testclient"):
             raise HTTPException(status_code=403, detail="The shop AI reads raw logs and is only reachable on the shop host")
-        return {"answer": ShopAIAssistant(raw_db_path=_guard.config.RAW_DB_PATH).chat(req.question)}
+        return {"answer": ShopAIAssistant(raw_db_path=_guard.config.RAW_DB_PATH, guard_db_path=_guard.config.GUARD_DB_PATH).chat(req.question)}
 
     @api.get("/api/egress")
     def get_egress():

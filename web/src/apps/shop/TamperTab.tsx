@@ -4,7 +4,7 @@ import { useLiveStore } from '@/stores/liveStore';
 import { TimeText } from '@/components/TimeText';
 
 // One page for the tamper demo: forge two payloads, see head office refuse both, and see that its records stayed clean.
-// The attack runs from the shop's chaos agent (localhost:9100), because it copies a real payload from that guard's ledger, so open this tab on the shop laptop.
+// The attack runs from the shop's chaos agent (localhost:9100), because it copies a real payload from that guard's ledger.
 
 interface Result { byte_flipped?: number; extra_field?: number; error?: string }
 
@@ -41,7 +41,7 @@ export const TamperTab: React.FC = () => {
       }
       setResult({ error: 'No answer from head office ingest in time.' });
     } catch (e: any) {
-      setResult({ error: e?.message?.includes('refused') ? e.message : `Chaos agent not reachable on ${CHAOS_API_URL}. Open this page on the shop laptop.` });
+      setResult({ error: e?.message?.includes('refused') ? e.message : `Chaos agent not reachable on ${CHAOS_API_URL}.` });
     }
     setBusy(false);
   };
@@ -61,7 +61,7 @@ export const TamperTab: React.FC = () => {
           <li><b className="text-rose-300">Left:</b> head office answers each with an error code, and nothing is stored.</li>
           <li><b className="text-purple-300">Right:</b> each rejection raises a tamper alert, while the delivery record stays intact: no duplicates, no gaps, checkpoint still matching.</li>
         </ol>
-        <button onClick={run} disabled={busy} className="px-5 py-2 rounded bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold">
+        <button onClick={run} disabled={busy} className="px-5 py-2 rounded bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-bold cursor-pointer">
           {busy ? 'ATTACKING…' : 'RUN TAMPER ATTACK'}
         </button>
         {result?.error && <div className="text-amber-300">{result.error}</div>}

@@ -3,9 +3,17 @@ import { shopApi, LocalGuardStatus, LocalLogEntry, EgressPayloadEntry, RevealReq
 import { EgressProofPanel } from '../../components/EgressProofPanel';
 import { TimeText } from '../../components/TimeText';
 import { LocalAiChat, AiReference } from './LocalAiChat';
+import { LeakProofTab } from './LeakProofTab';
+import { TamperTab } from './TamperTab';
+import { useLiveSocket } from '../../services/liveSocket';
+import { useLiveSync } from '../../services/liveSync';
+import { api } from '../../services/apiClient';
+import { useUiStore } from '../../stores/uiStore';
 
 export const ShopApp: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'logs' | 'ai'>('logs');
+  useLiveSocket();
+  useLiveSync();
+  const [activeTab, setActiveTab] = useState<'logs' | 'ai' | 'leak' | 'tamper'>('logs');
   const [status, setStatus] = useState<LocalGuardStatus | null>(null);
   const [guardDown, setGuardDown] = useState(false);
   const [logs, setLogs] = useState<LocalLogEntry[]>([]);
@@ -16,6 +24,18 @@ export const ShopApp: React.FC = () => {
   const [selectedEgress, setSelectedEgress] = useState<EgressPayloadEntry | null>(null);
   const [decidingId, setDecidingId] = useState<string | null>(null);
   const [spotlightId, setSpotlightId] = useState<string | null>(null);
+  const tzMode = useUiStore((s) => s.tzMode);
+  const setTzMode = useUiStore((s) => s.setTzMode);
+
+  // Default Shop screen to viewer local time so operator sees their real local time instead of UTC
+  useEffect(() => {
+    setTzMode('VIEWER');
+    if (!useUiStore.getState().authToken) {
+      api.login('admin', 'admin123').then((res) => {
+        useUiStore.getState().setAuth(res.token, res.user_id, res.role as any, res.tenant_id);
+      }).catch(() => {});
+    }
+  }, [setTzMode]);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -114,7 +134,7 @@ export const ShopApp: React.FC = () => {
           <nav className="flex space-x-2">
             <button
               onClick={() => setActiveTab('logs')}
-              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors ${
+              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors cursor-pointer ${
                 activeTab === 'logs'
                   ? 'bg-lime-500/15 text-lime-300 border border-lime-500/30'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
@@ -124,7 +144,7 @@ export const ShopApp: React.FC = () => {
             </button>
             <button
               onClick={() => setActiveTab('ai')}
-              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors ${
+              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors cursor-pointer ${
                 activeTab === 'ai'
                   ? 'bg-lime-500/15 text-lime-300 border border-lime-500/30'
                   : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
@@ -132,7 +152,41 @@ export const ShopApp: React.FC = () => {
             >
               LOCAL AI COPILOT
             </button>
+            <button
+              onClick={() => setActiveTab('leak')}
+              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors cursor-pointer ${
+                activeTab === 'leak'
+                  ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
+              }`}
+            >
+              LEAK TEST
+            </button>
+            <button
+              onClick={() => setActiveTab('tamper')}
+              className={`px-3 py-1.5 rounded text-xs font-bold tracking-wider transition-colors cursor-pointer ${
+                activeTab === 'tamper'
+                  ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-white/[0.04]'
+              }`}
+            >
+              TAMPER TEST
+            </button>
           </nav>
+        </div>
+
+        {/* Timezone Toggle */}
+        <div className="ml-auto flex items-center space-x-2">
+          <button
+            onClick={() => setTzMode(tzMode === 'UTC' ? 'VIEWER' : 'UTC')}
+            className="px-2.5 py-1 rounded bg-[#10141f] hover:bg-[#1a2234] text-slate-300 border border-white/10 text-[10px] font-mono font-bold transition-all flex items-center space-x-1.5 cursor-pointer"
+            title="Toggle between browser local time and UTC"
+          >
+            <span className="text-slate-500">TZ:</span>
+            <span className={tzMode === 'VIEWER' ? 'text-lime-400' : 'text-slate-300'}>
+              {tzMode === 'VIEWER' ? 'LOCAL TIME' : 'UTC (Z)'}
+            </span>
+          </button>
         </div>
       </header>
 
@@ -216,7 +270,10 @@ export const ShopApp: React.FC = () => {
                   <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
                     LOCAL RAW LOG STORE (SECRETS HIGHLIGHTED IN CRIMSON - VISIBLE ONLY HERE)
                   </span>
-                  <span className="text-[10px] text-slate-500">IN-MEMORY ROLLING DB</span>
+                  <span className="text-[10px] text-slate-400 font-mono font-bold flex items-center space-x-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-lime-400 animate-pulse"></span>
+                    <span>LIVE STREAM ({logs.length} RECORDS · AUTO-REFRESH 4S)</span>
+                  </span>
                 </div>
 
                 <div className="hud-panel p-3 bg-[#080A10] border border-white/10 max-h-96 overflow-y-auto space-y-2.5 divide-y divide-white/5">
@@ -370,6 +427,12 @@ export const ShopApp: React.FC = () => {
             onNavigateToReference={handleNavigateToReference}
           />
         )}
+
+        {/* TAB 3: LEAK TEST */}
+        {activeTab === 'leak' && <LeakProofTab />}
+
+        {/* TAB 4: TAMPER TEST */}
+        {activeTab === 'tamper' && <TamperTab />}
       </main>
     </div>
   );

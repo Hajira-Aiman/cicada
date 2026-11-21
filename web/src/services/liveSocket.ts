@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react';
 import { useLiveStore } from '../stores/liveStore';
 
+const isLocal = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+const defaultHq = isLocal ? '192.168.137.1' : (typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : '192.168.137.1');
 const WS_BASE_URL = import.meta.env.VITE_HQ_WS_URL || (
-  window.location.protocol === 'https:'
-    ? `wss://${window.location.host}/ws/live`
-    : `ws://${window.location.hostname}:8000/ws/live`
+  typeof window !== 'undefined' && window.location.protocol === 'https:'
+    ? `wss://${defaultHq}:8000/ws/live`
+    : `ws://${defaultHq}:8000/ws/live`
 );
 
 export function useLiveSocket() {

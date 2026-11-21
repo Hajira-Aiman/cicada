@@ -20,4 +20,4 @@ Start-Svc "guard-api" "-m guard.api.server"
 Start-Svc "chaos" "-m chaos.agent"
 Start-Sleep 5
 try { Invoke-RestMethod "http://${HqIp}:8000/health" | Out-Null; Write-Host "Head office reachable at $HqIp." } catch { Write-Host "CANNOT reach head office at ${HqIp}:8000. Check the IP and the firewall on laptop A." -ForegroundColor Red }
-Write-Host "Shop up. Open http://${HqIp}:5173/shop.html and http://${HqIp}:5173/chaos.html in a browser on THIS laptop."
+Write-Host "Shop up. Open http://localhost:5173/shop.html and http://localhost:5173/chaos.html in a browser on THIS laptop."

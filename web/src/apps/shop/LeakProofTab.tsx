@@ -6,7 +6,7 @@ import { useLiveStore } from '@/stores/liveStore';
 import { TimeText } from '@/components/TimeText';
 
 // One page for the try-to-leak demo: type a secret, see it in full inside the shop, and see that head office never gets it.
-// The left side reads the shop's own guard API (localhost:9000, raw logs are served to the shop machine only), so open this tab in a browser on the shop laptop.
+// The left side reads the shop's own guard API (localhost:9000, raw logs are served to the shop machine only).
 
 const SAMPLE = 'DB_PASSWORD=SuperSecret123!';
 interface Ev { id: number; category: string; severity: string; count: number; event_time: string; source: string }
@@ -79,7 +79,7 @@ export const LeakProofTab: React.FC = () => {
 
       {!shopUp && (
         <div className="p-3 rounded border border-amber-500/40 bg-amber-500/10 text-amber-300">
-          Shop guard not reachable on this browser (localhost:9000). Open this page on the shop laptop; raw logs are only served there.
+          Shop guard not reachable on this browser (localhost:9000). Raw logs are only served locally.
         </div>
       )}
 
