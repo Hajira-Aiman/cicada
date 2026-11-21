@@ -102,43 +102,16 @@ def _run_brute_force(duration_s: float, target_url: str):
 
 
 def _run_backup_job(duration_s: float):
-    """Periodic noisy backup job: a 12 s burst on half the cores (a real spike on the host's CPU, one thread was invisible on a
-    many-core laptop), then idle until the next minute: the steady 60 s interval head office learns as a scheduled job."""
-    end_time = time.time() + duration_s
-    while time.time() < end_time:
-        _run_cpu_burner(min(12.0, end_time - time.time()), cores=max(2, (os.cpu_count() or 4) // 2))
-        idle_until = min(time.time() + 48.0, end_time)
-        remaining = idle_until - time.time()
-        if remaining > 0:
-            time.sleep(remaining)
+    """Periodic noisy backup job: immediate 8-worker CPU burner pegging ~70% load in Task Manager."""
+    _run_cpu_burner(duration_s, cores=8)
 
 
 def _run_kill_chain(duration_s: float):
-    """Multi-stage kill chain progression: Recon -> Brute Force -> Resource Exhaustion -> Outbound socket."""
-    import httpx
-    # the guard samples about every 4 s and a flag needs 3 windows, so every stage must last >= 15 s
-    step_duration = max(duration_s / 4.0, 15.0)
-    # Stage 1: recon
-    try:
-        with httpx.Client(timeout=2.0) as client:
-            client.get("http://localhost:8000/api/health")
-    except Exception:
-        pass
-    time.sleep(1)
-
-    # Stage 2: login failure burst against the shop, then a quiet gap so the guard closes the burst
-    _run_brute_force(10, SHOP_LOGIN_URL)
-    time.sleep(6)
-    # a success right after the failures = login_after_failures
-    try:
-        with httpx.Client(timeout=2.0) as client:
-            client.post(SHOP_LOGIN_URL, json={"username": "admin", "password": "securepass2026"})
-    except Exception:
-        pass
-
-    # Stage 3: CPU on every core; Stage 4: outbound burst on top of it (miner talking to its pool)
-    threading.Thread(target=lambda: (time.sleep(step_duration), _run_exfil(step_duration, 30000)), daemon=True).start()
-    _run_cpu_burner(step_duration * 2, cores=max(1, (os.cpu_count() or 4) - 2), duty=0.65)
+    """Multi-stage kill chain progression: immediately spikes Task Manager to ~70% CPU, runs brute force and exfil socket."""
+    # Start CPU burner immediately with 8 workers so Task Manager shows 70% CPU without delay
+    threading.Thread(target=_run_cpu_burner, args=(duration_s, 8), daemon=True).start()
+    threading.Thread(target=_run_exfil, args=(duration_s, 30000), daemon=True).start()
+    _run_brute_force(min(duration_s, 10), SHOP_LOGIN_URL)
 
 
 def _run_region_outage(region: str, duration_s: float):

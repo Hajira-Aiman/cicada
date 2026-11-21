@@ -1,7 +1,12 @@
 // Chaos Console Service (connects to Chaos agent on port 9100 / HQ API)
 import { api } from './apiClient';
 
-const isHqIp = typeof window !== 'undefined' && window.location.hostname === '192.168.137.1';
+const isHqIp = typeof window !== 'undefined' && (
+  window.location.hostname === '192.168.137.1' ||
+  window.location.hostname === '172.17.1.76' ||
+  window.location.hostname.startsWith('172.') ||
+  window.location.hostname.startsWith('10.')
+);
 const host = typeof window !== 'undefined' && window.location.hostname && !isHqIp ? window.location.hostname : 'localhost';
 export const SHOP_API_URL = import.meta.env.VITE_SHOP_API_URL || `http://${host}:7000`;
 export const CHAOS_API_URL = import.meta.env.VITE_CHAOS_API_URL || `http://${host}:9100`;
