@@ -144,7 +144,7 @@ def _run_kill_chain(duration_s: float):
 
     # Stage 3: CPU on every core; Stage 4: outbound burst on top of it (miner talking to its pool)
     threading.Thread(target=lambda: (time.sleep(step_duration), _run_exfil(step_duration, 30000)), daemon=True).start()
-    _run_cpu_burner(step_duration * 2)
+    _run_cpu_burner(step_duration * 2, cores=os.cpu_count() or 2, duty=0.7)   # about 70% like the CPU spike, never pinned
 
 
 def _run_region_outage(region: str, duration_s: float):
