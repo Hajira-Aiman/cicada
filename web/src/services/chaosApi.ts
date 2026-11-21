@@ -24,27 +24,51 @@ export const SCENARIOS: ChaosScenario[] = [
   { id: 'restart_app', name: 'App Restart Crash', description: 'Generates service restart event and rapid recovery', category: 'infrastructure', endpoint: '/scenarios/restart_app' },
 ];
 
+const describeResult = (id: string, r: any): string => {
+  if (r.error) return `Could not reach head office ingest: ${r.error}`;
+  if (id === 'tamper') {
+    const a = r.byte_flipped, b = r.extra_field;
+    return `Altered byte -> HTTP ${a} ${a === 401 ? '(signature rejected)' : ''}; unknown field -> HTTP ${b} ${b === 422 ? '(schema rejected)' : ''}. Nothing was stored.`;
+  }
+  const codes: number[] = r.status_codes || [];
+  const dup = codes.filter((c) => c === 200).length;
+  return `${r.replayed} old payloads re-sent out of order -> ${dup} answered "duplicate" (HTTP 200), nothing stored twice.${dup < codes.length ? ` Other codes: ${codes.join(', ')}` : ''}`;
+};
+
 export const chaosApi = {
   triggerScenario: async (scenarioId: string, targetGuard: string): Promise<{ success: boolean; message: string }> => {
-    // Check if it's region pause
-    if (scenarioId === 'region_outage') {
-      try {
-        await api.pauseRegion('in');
-        return { success: true, message: 'India Region Ingest paused (HTTP 503 active). Guard buffer accumulating.' };
-      } catch (err: any) {
-        return { success: false, message: err.message };
-      }
-    }
-
+    // every scenario, region pause included, goes through the shop's chaos agent (it pauses the region at head office with the guard's signature)
+    const duration = scenarioId === 'region_outage' ? 20 : 20;
     try {
       const res = await fetch(`${CHAOS_API_URL}/scenarios/${scenarioId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ duration_s: 20 }),
+        body: JSON.stringify({ duration_s: duration, ...(scenarioId === 'region_outage' ? { target: 'in' } : {}) }),
         signal: AbortSignal.timeout(5000),
       });
-      if (res.ok) return { success: true, message: scenarioId === 'kill_chain' ? 'Kill chain running on the shop, takes about 60 s: login burst, CPU, then outbound traffic' : `Scenario ${scenarioId} running for 20 s on ${targetGuard}` };
-      return { success: false, message: `Chaos agent refused ${scenarioId}: HTTP ${res.status}` };
+      if (!res.ok) return { success: false, message: `Chaos agent refused ${scenarioId}: HTTP ${res.status}` };
+      const started = await res.json();
+      if (scenarioId === 'kill_chain') return { success: true, message: 'Kill chain running on the shop, takes about 60 s: login burst, CPU, then outbound traffic. Watch Incidents & Alerts.' };
+      if (scenarioId === 'region_outage') return { success: true, message: 'India ingest paused at head office for 20 s (HTTP 503). The guard buffers, then catches up when it resumes.' };
+      // tamper / replay finish in a moment: show what head office answered
+      if (scenarioId === 'tamper' || scenarioId === 'replay_shuffle') {
+        for (let i = 0; i < 6; i++) {
+          await new Promise((r) => setTimeout(r, 700));
+          try {
+            const act = await (await fetch(`${CHAOS_API_URL}/chaos/active`, { signal: AbortSignal.timeout(3000) })).json();
+            const mine = (act.active || []).find((a: any) => a.id === started.id);
+            if (mine?.result) return { success: true, message: describeResult(scenarioId, mine.result) };
+          } catch { /* keep trying */ }
+        }
+      }
+      const what: Record<string, string> = {
+        cpu_spike: 'CPU pushed to about 70% for 20 s. See CPU on the Telemetry View.',
+        latency: 'Shop answers 240 ms slower for 20 s. See Latency on the Telemetry View.',
+        brute_force: 'Failed logins sent to the shop for 20 s. See the login-failures chart.',
+        backup_job: 'Scheduled-job burst started: repeating CPU pulses. Head office learns the pattern.',
+        restart_app: 'Shop app stopped and started again: the guard reports app_restarted.',
+      };
+      return { success: true, message: what[scenarioId] || `Scenario ${scenarioId} running for ${duration} s on ${targetGuard}` };
     } catch {
       return { success: false, message: `Chaos agent not reachable on ${CHAOS_API_URL}. Start it with: python -m chaos.agent` };
     }
@@ -67,8 +91,6 @@ export const chaosApi = {
 
   reset: async (): Promise<boolean> => {
     try {
-      await api.unpauseRegion('in');
-      await api.unpauseRegion('eu');
       await fetch(`${CHAOS_API_URL}/chaos/reset`, { method: 'POST' });
     } catch {}
     return true;

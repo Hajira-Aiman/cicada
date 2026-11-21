@@ -390,6 +390,14 @@ def get_active_scenarios():
 def reset_all_chaos():
     with _lock:
         _active_scenarios.clear()
+    if os.getenv("HQ_URL"):   # a paused region must never stay paused
+        from guard.config import config
+        from guard.hq_client import hq_call
+        for region in ("in", "eu"):
+            try:
+                hq_call(config, os.environ["HQ_URL"], "POST", f"/api/regions/{region}/unpause")
+            except Exception:
+                pass
     return {"status": "ok", "message": "All chaos scenarios reset"}
 
 

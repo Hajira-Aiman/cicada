@@ -23,13 +23,14 @@ const METRICS: { name: string; label: string; unit: string; color: string; step?
   { name: 'battery_min_left', label: 'BATTERY MIN LEFT', unit: 'min', color: '#EAB308', minDelta: 5 },
 ];
 
-const SCENARIOS: { id: string; label: string; names: string[]; metrics: string[]; events: string[]; health?: boolean; hint: string }[] = [
-  { id: 'cpu_spike', label: 'CPU SPIKE', names: ['cpu_spike'], metrics: ['cpu_pct'], events: [], hint: 'CPU rises well above its baseline band.' },
-  { id: 'latency', label: 'LATENCY SPIKE', names: ['latency'], metrics: ['latency_ms', 'packet_loss_pct'], events: [], hint: 'Shop request latency jumps (the guard probes the shop).' },
-  { id: 'brute_force', label: 'BRUTE FORCE', names: ['brute_force', 'login_burst'], metrics: [], events: ['auth_failure_burst', 'login_after_failures'], hint: 'An auth_failure_burst event with a large count.' },
-  { id: 'kill_chain', label: 'KILL CHAIN', names: ['kill_chain'], metrics: ['cpu_pct', 'net_out_kbps'], events: ['auth_failure_burst', 'login_after_failures'], hint: 'Login burst, then CPU and outbound network together; see Incidents for the correlated incident.' },
-  { id: 'region_outage', label: 'REGION OUTAGE', names: ['region_outage', 'outage'], metrics: [], events: [], health: true, hint: 'Payloads stop arriving: health drops, then the backlog catches up.' },
-  { id: 'backup_job', label: 'BACKUP JOB', names: ['backup_job'], metrics: ['cpu_pct'], events: [], hint: 'A repeating CPU burst the system learns as a scheduled job.' },
+type Focus = string;   // a metric name, 'logins' (login failures) or 'arrivals' (payloads reaching head office)
+const SCENARIOS: { id: string; label: string; names: string[]; metrics: string[]; events: string[]; health?: boolean; hint: string; focus: Focus[] }[] = [
+  { id: 'cpu_spike', label: 'CPU SPIKE', names: ['cpu_spike'], metrics: ['cpu_pct'], events: [], hint: 'CPU should climb well above its normal band.', focus: ['cpu_pct'] },
+  { id: 'latency', label: 'LATENCY SPIKE', names: ['latency'], metrics: ['latency_ms', 'packet_loss_pct'], events: [], hint: 'The shop answers slower, so latency should jump.', focus: ['latency_ms'] },
+  { id: 'brute_force', label: 'BRUTE FORCE', names: ['brute_force', 'login_burst'], metrics: [], events: ['auth_failure_burst', 'login_after_failures'], hint: 'A burst of failed logins should appear as one tall bar.', focus: ['logins'] },
+  { id: 'kill_chain', label: 'KILL CHAIN', names: ['kill_chain'], metrics: ['cpu_pct', 'net_out_kbps'], events: ['auth_failure_burst', 'login_after_failures'], hint: 'Failed logins, then CPU, then outbound traffic: one critical incident.', focus: ['cpu_pct', 'net_out_kbps'] },
+  { id: 'region_outage', label: 'REGION OUTAGE', names: ['region_outage', 'outage'], metrics: [], events: [], health: true, hint: 'Payloads stop arriving (grey gap), then catch up.', focus: ['arrivals'] },
+  { id: 'backup_job', label: 'BACKUP JOB', names: ['backup_job'], metrics: ['cpu_pct'], events: [], hint: 'Repeating CPU pulses: the system learns them as a normal schedule.', focus: ['cpu_pct'] },
 ];
 
 const RANGES = [{ l: '5 MIN', ms: 5 * 60e3 }, { l: '15 MIN', ms: 15 * 60e3 }, { l: '1 HOUR', ms: 3600e3 }];
@@ -63,7 +64,6 @@ export const TelemetryTab: React.FC = () => {
   const [chaosOk, setChaosOk] = useState<boolean | null>(null);
   const [arrivals, setArrivals] = useState<number[]>([]);   // when each payload of this system reached head office
   const [now, setNow] = useState(Date.now());
-  const eventsRef = useRef<HTMLDivElement>(null);
   const lastSeen = useRef<Record<string, string>>({});
 
   // metrics: first load fetches the last hour, then only what is newer
@@ -135,11 +135,6 @@ export const TelemetryTab: React.FC = () => {
     return () => { stop = true; clearInterval(id); clearInterval(clock); };
   }, [chaosUrl]);
 
-  const pick = (id: string) => {
-    setScenario(id);
-    const target = SCENARIOS.find((x) => x.id === id)!;
-    if (target.events.length) setTimeout(() => eventsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50);   // event scenarios: jump to the events
-  };
   const saveUrl = (v: string) => { setChaosUrl(v); try { localStorage.setItem('chaosUrl', v); } catch { /* ignore */ } };
   const from = now - rangeMs;
   const sc = SCENARIOS.find((s) => s.id === scenario)!;
@@ -195,7 +190,6 @@ export const TelemetryTab: React.FC = () => {
     if (e.category === 'auth_failure_burst') failBars[i].fails += e.count; else if (e.category === 'login_after_failures') failBars[i].after += e.count;
   });
   const sumCat = (cat: string, ms: number) => events.filter((e) => e.category === cat && new Date(e.event_time).getTime() >= now - ms).reduce((a, e) => a + e.count, 0);
-  const eventsFocus = sc.events.length > 0;
   const tiles = [
     { l: 'FAILED LOGINS (60 S)', v: sumCat('auth_failure_burst', 60e3), hot: sc.events.includes('auth_failure_burst') },
     { l: 'LOGIN AFTER FAILURES (5 MIN)', v: sumCat('login_after_failures', 300e3), hot: sc.events.includes('login_after_failures') },
@@ -204,13 +198,77 @@ export const TelemetryTab: React.FC = () => {
     { l: 'PAYLOAD GAPS IN RANGE', v: gaps.length, hot: !!sc.health },
   ];
 
+  const [showAll, setShowAll] = useState(false);
+  const [showLog, setShowLog] = useState(false);
+  const [showMarkers, setShowMarkers] = useState(false);
+
+  const metricCard = (m: typeof METRICS[number], height = 150) => {
+    const data = bucket(series[m.name] || [], from, now);
+    const b = base[m.name];
+    const last = data[data.length - 1]?.v;
+    return (
+      <div key={m.name} className="hud-panel p-3">
+        <div className="flex items-baseline justify-between">
+          <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">{m.label}</span>
+          <span className="text-xl font-black text-slate-100">{last === undefined ? '—' : last.toFixed(m.step ? 0 : 1)}<span className="text-[10px] text-slate-500 ml-1">{m.unit}</span></span>
+        </div>
+        <div style={{ height }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={data} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
+              <CartesianGrid stroke="#ffffff10" vertical={false} />
+              <XAxis dataKey="t" type="number" domain={[from, now]} ticks={ticks} tickFormatter={fmtT} tick={{ fontSize: 9, fill: '#64748b' }} />
+              <YAxis tick={{ fontSize: 9, fill: '#64748b' }} domain={m.step ? [0, 1] : [0, 'auto']} allowDecimals={false} />
+              <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} formatter={(v: any) => [Number(v).toFixed(2) + m.unit, m.label]} />
+              {b && !m.step && <ReferenceArea y1={Math.max(0, b.mean - 2 * b.std)} y2={b.mean + 2 * b.std} fill={m.color} fillOpacity={0.1} stroke="none" />}
+              {gaps.map(([x1, x2], i) => <ReferenceArea key={i} x1={x1} x2={x2} fill="#94a3b8" fillOpacity={0.22} stroke="none" />)}
+              {shownMarks.map((k) => (
+                <ReferenceLine key={k.id} x={k.started_at * 1000} stroke={sc.names.includes(k.name) ? '#fbbf24' : '#ffffff55'} strokeDasharray="3 3"
+                  label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />
+              ))}
+              <Line type={m.step ? 'stepAfter' : 'monotone'} dataKey="v" stroke={m.color} strokeWidth={2} dot={false} isAnimationActive={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+    );
+  };
+
+  const barCard = (title: string, data: any[], keys: { k: string; c: string; name: string }[], withGaps: boolean, height = 150) => (
+    <div className="hud-panel p-3">
+      <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">{title}</span>
+      <div style={{ height }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
+            <CartesianGrid stroke="#ffffff10" vertical={false} />
+            <XAxis dataKey="t" type="number" domain={[from, now]} ticks={ticks} tickFormatter={fmtT} tick={{ fontSize: 9, fill: '#64748b' }} />
+            <YAxis tick={{ fontSize: 9, fill: '#64748b' }} allowDecimals={false} />
+            <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} />
+            {withGaps && gaps.map(([x1, x2], i) => <ReferenceArea key={i} x1={x1} x2={x2} fill="#94a3b8" fillOpacity={0.22} stroke="none" />)}
+            {shownMarks.map((k) => <ReferenceLine key={k.id} x={k.started_at * 1000} stroke="#fbbf24" strokeDasharray="3 3" label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />)}
+            {keys.map((x) => <Bar key={x.k} dataKey={x.k} name={x.name} stackId="a" fill={x.c} isAnimationActive={false} />)}
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+    </div>
+  );
+
+  const focusChart = (f: Focus) => {
+    if (f === 'logins') return <div key={f}>{barCard('FAILED LOGINS', failBars, [{ k: 'fails', c: '#f43f5e', name: 'failed logins' }, { k: 'after', c: '#fbbf24', name: 'login after failures' }], false, 190)}</div>;
+    if (f === 'arrivals') return <div key={f}>{barCard('PAYLOADS REACHING HEAD OFFICE', arrivalBars, [{ k: 'n', c: '#38bdf8', name: 'payloads' }], true, 190)}</div>;
+    return metricCard(METRICS.find((m) => m.name === f)!, 190);
+  };
+
+  const verdict = result ? result.lines.every((l) => l.ok) : null;
+  const health = [...histHere].pop();
+  const countText = sc.events.map((c) => `${sumCat(c, 300e3)} ${c.replace(/_/g, ' ')}`).join(' · ');
+
   return (
-    <div className="p-5 space-y-4 max-w-[1700px] mx-auto font-mono text-xs">
-      {/* controls */}
-      <div className="hud-panel p-3 flex flex-wrap items-center gap-3">
+    <div className="p-5 space-y-4 max-w-[1400px] mx-auto font-mono text-xs">
+      {/* one slim bar: system, range, health, markers */}
+      <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center bg-black/40 p-0.5 rounded border border-white/10">
-          {SYSTEMS.map((s) => (
-            <button key={s.id} onClick={() => setTenant(s.id)} className={`px-3 py-1 rounded font-bold ${tenant === s.id ? 'bg-sky-500 text-black' : 'text-slate-400 hover:text-white'}`}>{s.label}</button>
+          {SYSTEMS.map((x) => (
+            <button key={x.id} onClick={() => setTenant(x.id)} className={`px-3 py-1 rounded font-bold ${tenant === x.id ? 'bg-sky-500 text-black' : 'text-slate-400 hover:text-white'}`}>{x.label}</button>
           ))}
         </div>
         <div className="flex items-center bg-black/40 p-0.5 rounded border border-white/10">
@@ -218,159 +276,76 @@ export const TelemetryTab: React.FC = () => {
             <button key={r.l} onClick={() => setRangeMs(r.ms)} className={`px-3 py-1 rounded font-bold ${rangeMs === r.ms ? 'bg-purple-500 text-white' : 'text-slate-400 hover:text-white'}`}>{r.l}</button>
           ))}
         </div>
-        <div className="flex items-center gap-2 ml-auto">
-          <span className="text-[10px] text-slate-400 uppercase font-bold">SHOP CHAOS AGENT</span>
+        {health && <span className="px-2.5 py-1 rounded font-bold border border-white/10" style={{ color: STATE_COLOR[health.state] }}>● HEALTH {health.state.toUpperCase()}</span>}
+        <button onClick={() => setShowMarkers((v) => !v)} className={`ml-auto px-2.5 py-1 rounded border font-bold ${chaosOk ? 'border-emerald-500/40 text-emerald-400' : 'border-amber-400/50 text-amber-300'}`}>
+          {chaosOk ? `MARKERS ON (${shownMarks.length})` : 'SET UP MARKERS'}
+        </button>
+      </div>
+      {showMarkers && (
+        <div className="hud-panel p-3 flex items-center gap-2">
+          <span className="text-slate-400">Shop chaos agent address</span>
           <input value={chaosUrl} onChange={(e) => saveUrl(e.target.value)} placeholder="http://192.168.137.56:9100"
-            className="bg-black/50 border border-white/15 rounded px-2 py-1 w-60 text-slate-200 outline-none focus:border-sky-400" />
-          <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${chaosOk ? 'bg-emerald-500/20 text-emerald-400' : chaosOk === false ? 'bg-rose-500/20 text-rose-400' : 'bg-slate-700 text-slate-300'}`}>
-            {chaosOk ? `${shownMarks.length} RUNS IN RANGE` : chaosOk === false ? 'NOT REACHABLE' : 'ENTER ADDRESS FOR MARKERS'}
-          </span>
+            className="bg-black/50 border border-white/15 rounded px-2 py-1 w-64 text-slate-200 outline-none focus:border-sky-400" />
+          <span className={chaosOk ? 'text-emerald-400' : chaosOk === false ? 'text-rose-400' : 'text-slate-500'}>{chaosOk ? 'connected' : chaosOk === false ? 'not reachable' : 'not set'}</span>
         </div>
+      )}
+
+      {/* pick a scenario */}
+      <div className="flex flex-wrap gap-2">
+        {SCENARIOS.map((x) => (
+          <button key={x.id} onClick={() => setScenario(x.id)}
+            className={`px-4 py-2 rounded-lg border font-bold ${scenario === x.id ? 'bg-sky-500/20 border-sky-400 text-sky-100' : 'border-white/10 text-slate-400 hover:text-white'}`}>{x.label}</button>
+        ))}
       </div>
 
-      {/* scenario panel */}
-      <div className="hud-panel p-4 space-y-3 border-sky-500/30">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[10px] uppercase tracking-widest text-sky-400 font-bold mr-2">SCENARIO</span>
-          {SCENARIOS.map((s) => (
-            <button key={s.id} onClick={() => pick(s.id)}
-              className={`px-3 py-1 rounded border font-bold ${scenario === s.id ? 'bg-sky-500/20 border-sky-400 text-sky-200' : 'border-white/10 text-slate-400 hover:text-white'}`}>{s.label}</button>
-          ))}
-        </div>
-        <p className="text-slate-400">{sc.hint} Highlighted charts below are the ones this scenario should move.</p>
+      {/* the answer: one verdict, then only the charts that matter */}
+      <div className={`hud-panel p-5 space-y-2 ${verdict === true ? 'border-emerald-500/50' : verdict === false ? 'border-amber-400/50' : 'border-white/10'}`}>
+        <div className="text-base font-black text-white">{sc.label}</div>
+        <div className="text-slate-400">{sc.hint}</div>
         {result ? (
-          <div className="space-y-1">
-            <div className="text-slate-500">Last run: {fmtT(result.m.started_at * 1000)} UTC for {result.m.duration_s} s</div>
-            {result.lines.map((l, i) => (
-              <div key={i} className={l.ok ? 'text-emerald-400' : 'text-amber-300'}>{l.ok ? '✓ SEEN' : '… NOT SEEN'} · {l.text}</div>
-            ))}
-          </div>
+          <>
+            <div className={`text-lg font-black ${verdict ? 'text-emerald-400' : 'text-amber-300'}`}>{verdict ? '✓ SEEN ON THE DASHBOARD' : '… NOT SEEN (YET)'}</div>
+            {result.lines.map((l, i) => <div key={i} className={l.ok ? 'text-emerald-300' : 'text-amber-200'}>{l.ok ? '✓' : '•'} {l.text}</div>)}
+            <div className="text-slate-500">Run at {fmtT(result.m.started_at * 1000)} UTC for {result.m.duration_s} s</div>
+          </>
         ) : (
-          <div className="text-slate-500">{chaosOk ? 'This scenario has not been run since the chaos agent started.' : 'Enter the shop chaos agent address above to see runs and their effect.'}</div>
+          <div className="text-slate-500">{chaosOk ? 'No run yet. Start this scenario from the chaos console.' : 'Turn on markers (top right) to see when a scenario ran and whether it showed up.'}</div>
         )}
+        {sc.events.length > 0 && <div className="text-slate-300 pt-1">Last 5 minutes: {countText}</div>}
+        {sc.health && <div className="text-slate-300 pt-1">Gaps in payload arrival in this range: {gaps.length}</div>}
       </div>
+      <div className={`grid gap-3 ${sc.focus.length > 1 ? 'md:grid-cols-2' : 'grid-cols-1'}`}>{sc.focus.map(focusChart)}</div>
 
-      {/* health timeline */}
-      <div className="hud-panel p-4 space-y-2">
-        <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">HEALTH STATE OVER TIME</span>
-        <div className="relative h-6 rounded bg-black/40 overflow-hidden border border-white/5">
-          {segs.map((g, i) => (
-            <div key={i} title={`${g.state} from ${fmtT(g.s)}`} className="absolute top-0 bottom-0"
-              style={{ left: `${((g.s - from) / (now - from)) * 100}%`, width: `${((g.e - g.s) / (now - from)) * 100}%`, background: STATE_COLOR[g.state] || '#475569', opacity: 0.85 }} />
-          ))}
-          {shownMarks.map((m) => <div key={m.id} className="absolute top-0 bottom-0 w-px bg-white" style={{ left: `${((m.started_at * 1000 - from) / (now - from)) * 100}%` }} />)}
-        </div>
-        <div className="flex justify-between text-[10px] text-slate-500">{ticks.map((t) => <span key={t}>{fmtT(t)}</span>)}</div>
-        <div className="space-y-0.5 text-[11px]">
-          {histHere.slice(-5).reverse().map((h) => (
-            <div key={h.id} className="text-slate-400"><span style={{ color: STATE_COLOR[h.state] }}>{h.old_state ? `${h.old_state} → ` : ''}{h.state.toUpperCase()}</span> · {fmtT(new Date(h.at).getTime())} · {Array.isArray(h.reasons) ? h.reasons.join(', ') : String(h.reasons)}</div>
-          ))}
-          {histHere.length === 0 && <div className="text-slate-500">No health transitions recorded yet.</div>}
-        </div>
+      {/* everything else, on request */}
+      <div className="flex gap-2">
+        <button onClick={() => setShowAll((v) => !v)} className="px-3 py-1.5 rounded border border-white/10 text-slate-300 hover:text-white font-bold">{showAll ? '▲ HIDE' : '▼ SHOW'} ALL 11 METRICS</button>
+        <button onClick={() => setShowLog((v) => !v)} className="px-3 py-1.5 rounded border border-white/10 text-slate-300 hover:text-white font-bold">{showLog ? '▲ HIDE' : '▼ SHOW'} HEALTH &amp; EVENT LOG</button>
       </div>
-
-      {/* payload arrival: what a region outage does */}
-      <div className={`hud-panel p-4 space-y-2 ${sc.health ? 'border border-amber-400/70' : ''}`}>
-        <div className="flex items-baseline justify-between">
-          <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">PAYLOADS REACHING HEAD OFFICE (PER {Math.round(bucketMs / 1000)} S){sc.health && <span className="ml-2 text-amber-300">◄ {sc.label}</span>}</span>
-          <span className="text-slate-500">grey bands on every chart below = no payload arrived</span>
-        </div>
-        <div style={{ height: 110 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={arrivalBars} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
-              <CartesianGrid stroke="#ffffff10" vertical={false} />
-              <XAxis dataKey="t" type="number" domain={[from, now]} ticks={ticks} tickFormatter={fmtT} tick={{ fontSize: 9, fill: '#64748b' }} />
-              <YAxis tick={{ fontSize: 9, fill: '#64748b' }} allowDecimals={false} />
-              <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} formatter={(v: any) => [v, 'payloads']} />
-              {gaps.map(([a, b2], i) => <ReferenceArea key={i} x1={a} x2={b2} fill="#94a3b8" fillOpacity={0.22} stroke="none" />)}
-              {shownMarks.map((k) => <ReferenceLine key={k.id} x={k.started_at * 1000} stroke="#fbbf24" strokeDasharray="3 3" label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />)}
-              <Bar dataKey="n" fill="#38bdf8" isAnimationActive={false} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      {/* metric charts */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {METRICS.map((m) => {
-          const data = bucket(series[m.name] || [], from, now);
-          const b = base[m.name];
-          const hot = sc.metrics.includes(m.name);
-          const last = data[data.length - 1]?.v;
-          return (
-            <div key={m.name} className={`hud-panel p-3 ${hot ? 'border border-amber-400/70 shadow-[0_0_18px_rgba(251,191,36,0.15)]' : ''}`}>
-              <div className="flex items-baseline justify-between">
-                <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">{m.label}{hot && <span className="ml-2 text-amber-300">◄ {sc.label}</span>}</span>
-                <span className="text-lg font-black text-slate-100">{last === undefined ? '—' : last.toFixed(m.step ? 0 : 1)}<span className="text-[10px] text-slate-500 ml-1">{m.unit}</span></span>
-              </div>
-              <div style={{ height: 120 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <ComposedChart data={data} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
-                    <CartesianGrid stroke="#ffffff10" vertical={false} />
-                    <XAxis dataKey="t" type="number" domain={[from, now]} ticks={ticks} tickFormatter={fmtT} tick={{ fontSize: 9, fill: '#64748b' }} />
-                    <YAxis tick={{ fontSize: 9, fill: '#64748b' }} domain={m.step ? [0, 1] : [0, 'auto']} allowDecimals={false} />
-                    <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} formatter={(v: any) => [Number(v).toFixed(2) + m.unit, m.label]} />
-                    {b && !m.step && <ReferenceArea y1={Math.max(0, b.mean - 2 * b.std)} y2={b.mean + 2 * b.std} fill={m.color} fillOpacity={0.1} stroke="none" />}
-                    {gaps.map(([a, b2], i) => <ReferenceArea key={i} x1={a} x2={b2} fill="#94a3b8" fillOpacity={0.22} stroke="none" />)}
-                    {shownMarks.map((k) => (
-                      <ReferenceLine key={k.id} x={k.started_at * 1000} stroke={sc.names.includes(k.name) ? '#fbbf24' : '#ffffff55'} strokeDasharray="3 3"
-                        label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />
-                    ))}
-                    <Line type={m.step ? 'stepAfter' : 'monotone'} dataKey="v" stroke={m.color} strokeWidth={2} dot={false} isAnimationActive={false} />
-                  </ComposedChart>
-                </ResponsiveContainer>
-              </div>
+      {showAll && <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">{METRICS.map((m) => metricCard(m, 110))}</div>}
+      {showLog && (
+        <div className="grid md:grid-cols-2 gap-3">
+          <div className="hud-panel p-4 space-y-1">
+            <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">HEALTH CHANGES</span>
+            {histHere.slice(-8).reverse().map((h) => (
+              <div key={h.id} className="text-slate-400"><span style={{ color: STATE_COLOR[h.state] }}>{h.old_state ? `${h.old_state} → ` : ''}{h.state.toUpperCase()}</span> · {fmtT(new Date(h.at).getTime())} · {Array.isArray(h.reasons) ? h.reasons.join(', ') : String(h.reasons)}</div>
+            ))}
+            {histHere.length === 0 && <div className="text-slate-500">None yet.</div>}
+          </div>
+          <div className="hud-panel p-4 space-y-1">
+            <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">EVENTS IN RANGE ({evInRange.length})</span>
+            <div className="max-h-52 overflow-y-auto divide-y divide-white/5">
+              {evInRange.slice(0, 40).map((e) => (
+                <div key={e.id} className="flex items-center gap-3 py-1">
+                  <span className="text-slate-500 w-16">{fmtT(new Date(e.event_time).getTime())}</span>
+                  <span className="text-slate-200">{e.category}</span>
+                  <span className="text-slate-400">x{e.count}</span>
+                </div>
+              ))}
+              {evInRange.length === 0 && <div className="py-2 text-slate-500">No events in this range.</div>}
             </div>
-          );
-        })}
-      </div>
-
-      {/* security events */}
-      <div ref={eventsRef} className={`hud-panel p-4 space-y-3 ${eventsFocus ? 'border border-amber-400/70' : ''}`}>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-          {tiles.map((t) => (
-            <div key={t.l} className={`p-2.5 rounded bg-black/40 border ${t.hot ? 'border-amber-400/70' : 'border-white/5'}`}>
-              <div className="text-[9px] text-slate-400 font-bold uppercase">{t.l}</div>
-              <div className={`text-2xl font-black ${t.v > 0 && t.hot ? 'text-amber-300' : 'text-slate-100'}`}>{t.v}</div>
-            </div>
-          ))}
+          </div>
         </div>
-        <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold block">LOGIN FAILURES PER {Math.round(bucketMs / 1000)} S{eventsFocus && <span className="ml-2 text-amber-300">◄ {sc.label}</span>}</span>
-        <div style={{ height: eventsFocus ? 200 : 120 }}>
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={failBars} margin={{ top: 4, right: 6, left: -18, bottom: 0 }}>
-              <CartesianGrid stroke="#ffffff10" vertical={false} />
-              <XAxis dataKey="t" type="number" domain={[from, now]} ticks={ticks} tickFormatter={fmtT} tick={{ fontSize: 9, fill: '#64748b' }} />
-              <YAxis tick={{ fontSize: 9, fill: '#64748b' }} allowDecimals={false} />
-              <Tooltip contentStyle={{ background: '#0c1017', border: '1px solid #ffffff22', fontSize: 11 }} labelFormatter={(t) => fmtT(Number(t))} />
-              {shownMarks.map((k) => <ReferenceLine key={k.id} x={k.started_at * 1000} stroke="#fbbf24" strokeDasharray="3 3" label={{ value: k.name, position: 'insideTopRight', fontSize: 9, fill: '#cbd5e1' }} />)}
-              <Bar dataKey="fails" name="failed logins" stackId="a" fill="#f43f5e" isAnimationActive={false} />
-              <Bar dataKey="after" name="login after failures" stackId="a" fill="#fbbf24" isAnimationActive={false} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-        <span className="text-[10px] uppercase tracking-widest text-slate-400 font-bold block">SECURITY &amp; SYSTEM EVENTS ({evInRange.length} IN RANGE)</span>
-        <div className="relative h-14 rounded bg-black/40 border border-white/5 overflow-hidden">
-          {evInRange.map((e) => {
-            const x = ((new Date(e.event_time).getTime() - from) / (now - from)) * 100;
-            const hotEv = sc.events.includes(e.category);
-            return <div key={e.id} title={`${e.category} x${e.count} at ${fmtT(new Date(e.event_time).getTime())}`} className="absolute bottom-0 w-1.5 rounded-t"
-              style={{ left: `${x}%`, height: `${Math.min(100, 18 + Math.log2(1 + e.count) * 14)}%`, background: hotEv ? '#fbbf24' : e.severity === 'high' || e.severity === 'critical' ? '#f43f5e' : '#38bdf8' }} />;
-          })}
-          {shownMarks.map((m) => <div key={m.id} className="absolute top-0 bottom-0 w-px bg-white/60" style={{ left: `${((m.started_at * 1000 - from) / (now - from)) * 100}%` }} />)}
-        </div>
-        <div className="max-h-40 overflow-y-auto divide-y divide-white/5">
-          {evInRange.slice(0, 40).map((e) => (
-            <div key={e.id} className="flex items-center gap-3 py-1 text-[11px]">
-              <span className="text-slate-500 w-16">{fmtT(new Date(e.event_time).getTime())}</span>
-              <span className={`px-1.5 rounded text-[10px] font-bold ${e.severity === 'high' || e.severity === 'critical' ? 'bg-rose-500/20 text-rose-300' : 'bg-sky-500/15 text-sky-300'}`}>{e.severity}</span>
-              <span className="text-slate-200">{e.category}</span>
-              <span className="text-slate-400">x{e.count}</span>
-            </div>
-          ))}
-          {evInRange.length === 0 && <div className="py-3 text-center text-slate-500">No events in this time range.</div>}
-        </div>
-      </div>
+      )}
     </div>
   );
 };
