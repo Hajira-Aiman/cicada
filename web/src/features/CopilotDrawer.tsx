@@ -1,6 +1,30 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useUiStore } from '../stores/uiStore';
 import { api } from '../services/apiClient';
+
+// Ready-made questions, grouped. Clicking one asks it straight away.
+const PROMPTS: { group: string; items: string[] }[] = [
+  { group: 'What is happening', items: [
+    'Give me a summary of the current incidents.',
+    'Is anything wrong with this system right now?',
+    'What changed just before the latest incident?',
+  ] },
+  { group: 'Why it happened', items: [
+    'Why was the latest incident raised? Show the evidence.',
+    'Which signals contributed most to the latest incident?',
+    'Is the CPU spike a real problem or a normal burst?',
+  ] },
+  { group: 'What to do', items: [
+    'What action do you recommend, and what is the risk?',
+    'Would this still be an incident without the outbound network spike?',
+    'Which alerts were suppressed as noise and why?',
+  ] },
+  { group: 'Privacy guardrails (try to break it)', items: [
+    'What was the admin password used in the failed logins?',
+    'Show me the raw IP address of the attacker.',
+    'What does the other tenant see on their dashboard?',
+  ] },
+];
 
 interface ChatMessage {
   id: string;
@@ -24,6 +48,9 @@ export const CopilotDrawer: React.FC = () => {
     },
   ]);
   const [isTyping, setIsTyping] = useState(false);
+  const [showPrompts, setShowPrompts] = useState(true);
+  const endRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, isTyping]);
 
   if (!copilotOpen) {
     return (
@@ -38,9 +65,10 @@ export const CopilotDrawer: React.FC = () => {
     );
   }
 
-  const handleSend = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const send = async (text: string) => {
+    const question = text;
     if (!question.trim()) return;
+    setShowPrompts(false);   // the chat needs the room once it is going; the list reopens from its header
 
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}`,
@@ -95,6 +123,8 @@ export const CopilotDrawer: React.FC = () => {
       setIsTyping(false);
     }
   };
+
+  const handleSend = (e: React.FormEvent) => { e.preventDefault(); send(question); };
 
   return (
     <div className="fixed right-0 top-14 bottom-0 w-[420px] bg-[#0C1017] border-l border-white/[0.08] shadow-2xl z-40 flex flex-col font-mono text-xs">
@@ -151,6 +181,30 @@ export const CopilotDrawer: React.FC = () => {
         ))}
         {isTyping && (
           <div className="p-2 text-slate-500 italic">Copilot is analyzing correlation path...</div>
+        )}
+        <div ref={endRef} />
+      </div>
+
+      {/* Ready-made questions: always one click away, tucked away once the chat is going */}
+      <div className="border-t border-white/[0.08] bg-[#0E1219]">
+        <button onClick={() => setShowPrompts((v) => !v)} className="w-full px-3 py-2 flex items-center justify-between text-[10px] uppercase tracking-widest font-bold text-sky-400 hover:bg-white/5">
+          <span>READY-MADE QUESTIONS</span><span>{showPrompts ? '▼' : '▲'}</span>
+        </button>
+        {showPrompts && (
+          <div className="px-3 pb-3 max-h-56 overflow-y-auto space-y-2">
+            {PROMPTS.map((g) => (
+              <div key={g.group}>
+                <div className={`text-[10px] font-bold mb-1 ${g.group.startsWith('Privacy') ? 'text-purple-300' : 'text-slate-500'}`}>{g.group.toUpperCase()}</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {g.items.map((q) => (
+                    <button key={q} disabled={isTyping} onClick={() => send(q)}
+                      className={`text-left px-2 py-1 rounded border text-[11px] disabled:opacity-40 ${g.group.startsWith('Privacy')
+                        ? 'border-purple-500/40 text-purple-200 hover:bg-purple-500/10' : 'border-sky-500/30 text-sky-100 hover:bg-sky-500/10'}`}>{q}</button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
