@@ -268,6 +268,127 @@ def _run_restart_app(target: Optional[str] = None):
         pass  # neither systemctl nor docker on this host (e.g. Windows)
 
 
+def _shop_log(text: str):
+    """One line into the shop's log (the guard tails it)."""
+    import httpx
+    try:
+        httpx.post(f"{SHOP_API_URL}/chaos/inject-log", json={"text": text}, timeout=2)
+    except httpx.HTTPError:
+        pass
+
+
+def _run_port_scan(duration_s: float):
+    """Real connection attempts across ports 1-1024 on this machine, round after round."""
+    import socket
+    end = time.time() + duration_s
+    _shop_log("Port scan detected: sequential connection attempts to ports 1-1024 from 10.0.0.66")
+    while time.time() < end:
+        for port in range(1, 1025):
+            if time.time() > end:
+                break
+            with socket.socket() as s:
+                s.settimeout(0.02)
+                s.connect_ex(("127.0.0.1", port))
+
+
+def _run_crypto_miner(duration_s: float):
+    """Sustained CPU on every core plus a steady trickle to a mining pool (TEST-NET, never delivered)."""
+    _shop_log("Unknown process xmrig-update started, connecting to pool.minexmr.example:4444")
+    threading.Thread(target=_run_exfil, args=(duration_s, 1500), daemon=True).start()
+    _run_cpu_burner(duration_s, cores=os.cpu_count() or 2, duty=0.7)
+
+
+def _run_crash_loop(duration_s: float):
+    """The shop app dies and restarts every ~8 s: the guard reports app_restarted each time."""
+    end = time.time() + duration_s
+    while time.time() < end:
+        _shop_log("shop-api exited with code 137 (killed), supervisor restarting it")
+        _restart_shop_api_by_pid()
+        time.sleep(8)
+
+
+def _run_ransomware(duration_s: float):
+    """Real disk churn in a temp folder: create, rewrite and rename (.locked) files as fast as possible."""
+    import tempfile
+    end = time.time() + duration_s
+    _shop_log("Mass file modification: 500+ files renamed to *.locked in 10 s under C:/Users/shop/Documents")
+    with tempfile.TemporaryDirectory(prefix="chaos_churn_") as d:
+        i = 0
+        while time.time() < end:
+            f = os.path.join(d, f"doc{i % 300}.txt")
+            with open(f, "wb") as fh:
+                fh.write(os.urandom(256 * 1024))
+            os.replace(f, f + ".locked")
+            i += 1
+
+
+def _run_slow_disk(duration_s: float, delay_ms: int = 800):
+    """Disk saturated by fsync'd writes while the shop answers slowly (its database is waiting on I/O)."""
+    import tempfile
+    _run_shop_latency(duration_s, delay_ms)
+    _shop_log("Postgres: slow query 4210 ms (disk I/O wait high)")
+    end = time.time() + duration_s
+    with tempfile.TemporaryFile() as fh:
+        while time.time() < end:
+            fh.write(os.urandom(1024 * 1024))
+            fh.flush()
+            os.fsync(fh.fileno())
+            if fh.tell() > 512 * 1024 * 1024:
+                fh.truncate(0)
+                fh.seek(0)
+
+
+def _run_http_5xx(duration_s: float):
+    """The shop's catalog and checkout return HTTP 500; a little customer traffic makes the errors show up."""
+    import httpx
+    try:
+        httpx.post(f"{SHOP_API_URL}/chaos/errors", json={"duration_s": int(duration_s)}, timeout=3)
+    except httpx.HTTPError:
+        return
+    end = time.time() + duration_s
+    with httpx.Client(timeout=2.0) as c:
+        while time.time() < end:
+            try:
+                c.get(f"{SHOP_API_URL}/catalog")
+                c.post(f"{SHOP_API_URL}/cart/checkout", json={"card_number": "4111111111111111", "amount": 49.0})
+            except httpx.HTTPError:
+                pass
+            time.sleep(0.3)
+
+
+def _run_credential_stuffing(duration_s: float):
+    """Leaked username/password pairs tried against the shop's login, ~10 per second, one lucky hit at the end."""
+    import httpx
+    users = ["alice", "bob", "carol", "dave", "erin", "admin", "root", "support", "sales", "guest"]
+    pws = ["Summer2024!", "qwerty123", "letmein", "Passw0rd", "welcome1", "hunter2"]
+    end = time.time() + duration_s
+    with httpx.Client(timeout=2.0) as c:
+        i = 0
+        while time.time() < end:
+            try:
+                c.post(SHOP_LOGIN_URL, json={"username": users[i % len(users)], "password": pws[(i // len(users)) % len(pws)]})
+            except httpx.HTTPError:
+                pass
+            i += 1
+            time.sleep(0.1)
+        try:
+            c.post(SHOP_LOGIN_URL, json={"username": "admin", "password": "securepass2026"})
+        except httpx.HTTPError:
+            pass
+
+
+NEW_SCENARIOS = {   # name -> worker(duration_s)
+    "port_scan": _run_port_scan,
+    "data_exfil": lambda d: _run_exfil(d, 30000),
+    "crypto_miner": _run_crypto_miner,
+    "crash_loop": _run_crash_loop,
+    "ransomware": _run_ransomware,
+    "slow_disk": _run_slow_disk,
+    "http_5xx": _run_http_5xx,
+    "credential_stuffing": _run_credential_stuffing,
+}
+
+
 class ScenarioRequest(BaseModel):
     duration_s: int = 15
     target: Optional[str] = None
@@ -325,6 +446,8 @@ def _activate_scenario(name: str, duration_s: int, target: Optional[str] = None,
             threading.Thread(target=_run_latency_netem, args=(duration_s, delay, loss, iface), daemon=True).start()
         else:
             threading.Thread(target=_run_shop_latency, args=(duration_s, delay), daemon=True).start()
+    elif name in NEW_SCENARIOS:
+        threading.Thread(target=NEW_SCENARIOS[name], args=(duration_s,), daemon=True).start()
     elif name == "restart_app":
         worker = _run_restart_app if sys.platform.startswith("linux") else _restart_shop_api_by_pid
         threading.Thread(target=worker, args=(target,) if worker is _run_restart_app else (), daemon=True).start()
@@ -369,6 +492,7 @@ def list_scenarios():
             "kill_chain",
             "backup_job",
             "restart_app",
+            *NEW_SCENARIOS,
         ]
     }
 
@@ -488,6 +612,16 @@ def trigger_backup_job(req: ScenarioRequest = ScenarioRequest()):
 def trigger_restart_app(req: ScenarioRequest = ScenarioRequest()):
     """Triggers application restart simulation."""
     return _activate_scenario("restart_app", req.duration_s, req.target, req.params)
+
+
+def _new_scenario_route(name: str):
+    def trigger(req: ScenarioRequest = ScenarioRequest()):
+        return _activate_scenario(name, req.duration_s, req.target, req.params)
+    app.post(f"/scenarios/{name}")(trigger)
+
+
+for _name in NEW_SCENARIOS:
+    _new_scenario_route(_name)
 
 
 if __name__ == "__main__":

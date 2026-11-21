@@ -9,8 +9,7 @@ const TABS = [
   { path: '/telemetry', label: 'TELEMETRY VIEW' },
   { path: '/incidents', label: 'INCIDENTS & ALERTS' },
   { path: '/privacy', label: 'PRIVACY & PROOF' },
-  { path: '/leak-proof', label: 'LEAK TEST' },
-  { path: '/tamper', label: 'TAMPER TEST' },
+  { path: '/database', label: 'DATABASE' },
 ];
 
 export const TopNav: React.FC = () => {

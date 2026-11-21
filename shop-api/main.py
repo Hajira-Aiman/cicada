@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 LOG_FILE_PATH = os.getenv("SHOP_LOG_PATH", "data/shop-api.log")
@@ -29,8 +30,14 @@ app = FastAPI(title="Demo Shop API", version="1.0.0")
 _delay = {"until": 0.0, "ms": 0}   # chaos: every non-chaos request waits `ms` until `until`
 
 
+_errors = {"until": 0.0}   # chaos: catalog and checkout answer HTTP 500 until then
+
+
 @app.middleware("http")
 async def artificial_latency(request: Request, call_next):
+    if time.time() < _errors["until"] and request.url.path in ("/catalog", "/cart/checkout"):
+        log_shop_event({"level": "ERROR", "event": "http_500", "message": f"HTTP 500 on {request.url.path}: upstream database connection failed"})
+        return JSONResponse({"detail": "Internal Server Error"}, status_code=500)
     if time.time() < _delay["until"] and not request.url.path.startswith("/chaos"):
         await asyncio.sleep(_delay["ms"] / 1000.0)
     return await call_next(request)
@@ -148,6 +155,13 @@ def chaos_latency(req: LatencyRequest):
     """Slows every shop request by delay_ms for duration_s: the guard's health probe then reports real latency."""
     _delay["ms"], _delay["until"] = req.delay_ms, time.time() + req.duration_s
     return {"status": "slow", "delay_ms": req.delay_ms, "duration_s": req.duration_s}
+
+
+@app.post("/chaos/errors")
+def chaos_errors(req: LatencyRequest):
+    """Catalog and checkout fail with HTTP 500 for duration_s (delay_ms is ignored)."""
+    _errors["until"] = time.time() + req.duration_s
+    return {"status": "failing", "duration_s": req.duration_s}
 
 
 @app.post("/chaos/inject-log")

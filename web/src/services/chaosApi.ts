@@ -20,6 +20,14 @@ export const SCENARIOS: ChaosScenario[] = [
   { id: 'tamper', name: 'Tamper Schema / HMAC', description: 'Mutates payload bytes to trigger cryptographic rejection', category: 'tamper', endpoint: '/scenarios/tamper' },
   { id: 'kill_chain', name: 'Full Kill Chain', description: 'Burst login -> privilege escalation -> CPU spike -> outbound burst', category: 'attack', endpoint: '/scenarios/kill_chain' },
   { id: 'backup_job', name: 'Periodic Backup Job', description: 'Known scheduled pattern (tests suppression without alerts)', category: 'reliability', endpoint: '/scenarios/backup_job' },
+  { id: 'port_scan', name: 'Port Scan', description: 'Network: sequential connection attempts across ports 1-1024, plus a scan line in the shop log', category: 'attack', endpoint: '/scenarios/port_scan' },
+  { id: 'data_exfil', name: 'Data Exfil Burst', description: 'Network: large unusual outbound transfer (about 30 Mbps) to an unknown address', category: 'attack', endpoint: '/scenarios/data_exfil' },
+  { id: 'crypto_miner', name: 'Crypto-Miner', description: 'Compute: sustained 70% CPU from an unknown process, with steady traffic to a mining pool', category: 'attack', endpoint: '/scenarios/crypto_miner' },
+  { id: 'crash_loop', name: 'Service Crash Loop', description: 'Compute: the shop app is killed and restarted every ~8 s', category: 'reliability', endpoint: '/scenarios/crash_loop' },
+  { id: 'ransomware', name: 'Ransomware File Churn', description: 'Storage: mass file rewrites and .locked renames, heavy disk writes', category: 'attack', endpoint: '/scenarios/ransomware' },
+  { id: 'slow_disk', name: 'Slow Disk / Slow DB', description: 'Storage: disk saturated with synced writes, shop answers 800 ms slower', category: 'reliability', endpoint: '/scenarios/slow_disk' },
+  { id: 'http_5xx', name: 'HTTP 5xx Error Storm', description: 'Web app: catalog and checkout return HTTP 500 while customers keep coming', category: 'reliability', endpoint: '/scenarios/http_5xx' },
+  { id: 'credential_stuffing', name: 'Credential Stuffing', description: 'Web app: leaked username/password pairs against the shop login, then one success', category: 'attack', endpoint: '/scenarios/credential_stuffing' },
 ];
 
 const describeResult = (id: string, r: any): string => {

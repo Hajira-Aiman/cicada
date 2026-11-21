@@ -8,8 +8,7 @@ import { LiveMapTab } from './pages/LiveMapTab';
 import { IncidentsTab } from './pages/IncidentsTab';
 import { PrivacyTab } from './pages/PrivacyTab';
 import { TelemetryTab } from './pages/TelemetryTab';
-import { LeakProofTab } from './pages/LeakProofTab';
-import { TamperTab } from './pages/TamperTab';
+import { DatabaseTab } from './pages/DatabaseTab';
 import { useLiveSocket } from '../../services/liveSocket';
 import { useLiveSync } from '../../services/liveSync';
 import { LoginPage } from '../../features/LoginPage';
@@ -31,8 +30,7 @@ export const HqApp: React.FC = () => {
           <Route path="/telemetry" element={<TelemetryTab />} />
           <Route path="/incidents" element={<IncidentsTab />} />
           <Route path="/privacy" element={<PrivacyTab />} />
-          <Route path="/leak-proof" element={<LeakProofTab />} />
-          <Route path="/tamper" element={<TamperTab />} />
+          <Route path="/database" element={<DatabaseTab />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
         </Routes>
       </main>

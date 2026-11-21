@@ -305,6 +305,36 @@ def get_incidents(user: Dict[str, Any] = Depends(get_current_user)):
     return {"incidents": rows}
 
 
+_DB_VIEW_HIDDEN_COLS = {"password_hash"}
+
+
+def _db_view_guard(user: Dict[str, Any], db: str):
+    if user.get("role") != "engineer":
+        raise HTTPException(status_code=403, detail="Engineers only")
+    if db not in ("airlock_core", "airlock_in", "airlock_eu"):
+        raise HTTPException(status_code=400, detail="Unknown database")
+
+
+@app.get("/api/db/tables")
+def db_tables(db: str = "airlock_in", user: Dict[str, Any] = Depends(get_current_user)):
+    """Row-wise data viewer: table names with row counts."""
+    _db_view_guard(user, db)
+    names = [r["table_name"] for r in execute_query(db, "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY 1;", tenant_id="all")]
+    return {"tables": [{"name": n, "rows": execute_query(db, f'SELECT COUNT(*) AS c FROM "{n}";', tenant_id="all")[0]["c"]} for n in names]}
+
+
+@app.get("/api/db/rows")
+def db_rows(db: str, table: str, limit: int = Query(100, ge=1, le=500), user: Dict[str, Any] = Depends(get_current_user)):
+    _db_view_guard(user, db)
+    cols = [r["column_name"] for r in execute_query(db, "SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=%s ORDER BY ordinal_position;", (table,), tenant_id="all")]
+    cols = [c for c in cols if c not in _DB_VIEW_HIDDEN_COLS]
+    if not cols:
+        raise HTTPException(status_code=404, detail="Unknown table")   # also stops any non-table name reaching the SQL below
+    rows = execute_query(db, f'SELECT {", ".join(chr(34) + c + chr(34) for c in cols)} FROM "{table}" ORDER BY 1 DESC LIMIT {int(limit)};', tenant_id="all")
+    ok = (str, int, float, bool, type(None), dict, list)
+    return {"columns": cols, "rows": [{k: (v if isinstance(v, ok) else str(v)) for k, v in r.items()} for r in rows]}
+
+
 @app.get("/api/alerts")
 def get_alerts(user: Dict[str, Any] = Depends(get_current_user)):
     rows = query_tenant_data(user, "aiops_alerts", select_cols="alert_id, tenant_id, source, title, severity, body, status, created_at, updated_at", order_by="created_at DESC")
