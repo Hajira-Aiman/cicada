@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { CHAOS_API_URL } from '@/services/chaosApi';
-import { useLiveStore } from '@/stores/liveStore';
-import { TimeText } from '@/components/TimeText';
+import { CHAOS_API_URL } from '../../services/chaosApi';
+import { useLiveStore } from '../../stores/liveStore';
+import { TimeText } from '../../components/TimeText';
 
 // One page for the tamper demo: forge two payloads, see head office refuse both, and see that its records stayed clean.
 // The attack runs from the shop's chaos agent (localhost:9100), because it copies a real payload from that guard's ledger.

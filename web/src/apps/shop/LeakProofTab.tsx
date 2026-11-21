@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
-import { apiFetch } from '@/services/apiClient';
-import { chaosApi } from '@/services/chaosApi';
-import { shopApi, EgressPayloadEntry, LocalGuardStatus, LocalLogEntry } from '@/services/shopApi';
-import { useLiveStore } from '@/stores/liveStore';
-import { TimeText } from '@/components/TimeText';
+import { apiFetch } from '../../services/apiClient';
+import { chaosApi } from '../../services/chaosApi';
+import { shopApi, EgressPayloadEntry, LocalGuardStatus, LocalLogEntry } from '../../services/shopApi';
+import { useLiveStore } from '../../stores/liveStore';
+import { TimeText } from '../../components/TimeText';
 
 // One page for the try-to-leak demo: type a secret, see it in full inside the shop, and see that head office never gets it.
 // The left side reads the shop's own guard API (localhost:9000, raw logs are served to the shop machine only).
