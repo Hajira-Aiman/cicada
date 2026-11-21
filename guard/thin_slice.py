@@ -665,11 +665,15 @@ def run_loop(
     try:
         while max_iterations is None or iteration < max_iterations:
             time.sleep(interval)
-            payload, body_bytes = guard.collect_window(
-                duration_seconds=interval, probe_client=probe_client
-            )
-            guard.send_payload(payload, body_bytes, client=ingest_client)
-            guard.maybe_publish_checkpoint()
+            try:
+                payload, body_bytes = guard.collect_window(
+                    duration_seconds=interval, probe_client=probe_client
+                )
+                guard.send_payload(payload, body_bytes, client=ingest_client)
+                guard.maybe_publish_checkpoint()
+            except Exception:
+                # one bad window (a locked database, a dropped socket, a starved CPU) must never end the guard for good
+                logger.exception("Guard loop iteration failed; carrying on with the next window")
             iteration += 1
     except KeyboardInterrupt:
         logger.info("Guard stopped by operator.")

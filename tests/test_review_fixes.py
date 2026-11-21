@@ -110,3 +110,20 @@ def test_packet_loss_median_ignores_one_stall_but_not_an_outage(tmp_path):
     for v in (100, 100, 100):
         h.append(v)
     assert statistics.median(h) == 100        # sustained: reported
+
+
+def test_guard_loop_survives_a_failing_window(tmp_path):
+    from guard.config import GuardConfig
+    from guard.thin_slice import GuardThinSlice, run_loop
+    cfg = GuardConfig()
+    cfg.GUARD_DB_PATH, cfg.RAW_DB_PATH, cfg.REVEAL_DB_PATH, cfg.SHOP_LOG_PATH = (
+        str(tmp_path / "g.db"), str(tmp_path / "r.db"), str(tmp_path / "v.db"), str(tmp_path / "s.log"))
+    guard = GuardThinSlice(cfg=cfg)
+    calls = []
+
+    def flaky(duration_seconds, probe_client=None):
+        calls.append(1)
+        raise RuntimeError("database is locked")
+    guard.collect_window = flaky
+    run_loop(guard, interval=0.01, max_iterations=3)   # used to die on the first exception
+    assert len(calls) == 3
